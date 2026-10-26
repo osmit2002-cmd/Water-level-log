@@ -1,11 +1,11 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { boreholesCsv, columnLabel, csvFilename, parseBoreholesCsv, readingsCsv } from '../lib/csv';
 import { findName, getNextReadingId, replaceAll, upsertBoreholes } from '../lib/db';
 import { makeBackup, validateBackup } from '../lib/backup';
 import { saveFile } from '../lib/share';
 import { todayLocal } from '../lib/math';
-import { COLUMNS, type ColumnKey, type Settings } from '../lib/types';
+import { COLUMNS, USER_CODE_MAX, normalizeUserCode, userCodeError, type ColumnKey, type Settings } from '../lib/types';
 
 export default function SettingsPage() {
   const { boreholes, bhMap, readings, derived, settings, setSettings, reload, persisted } = useStore();
@@ -13,6 +13,16 @@ export default function SettingsPage() {
   const [msg, setMsg] = useState<{ kind: 'ok' | 'error'; text: string; details?: string[] }>();
   const csvIn = useRef<HTMLInputElement>(null);
   const jsonIn = useRef<HTMLInputElement>(null);
+  const [code, setCode] = useState(settings.userCode);
+  useEffect(() => setCode(settings.userCode), [settings.userCode]);
+  const [codeMsg, setCodeMsg] = useState<{ kind: 'ok' | 'error'; text: string }>();
+  function saveCode() {
+    const c = normalizeUserCode(code);
+    const e = userCodeError(c);
+    if (e) return setCodeMsg({ kind: 'error', text: e });
+    set({ userCode: c }); setCode(c);
+    setCodeMsg({ kind: 'ok', text: `Saved. New readings on this phone will record ${c}.` });
+  }
   const onCount = COLUMNS.filter((c) => settings.columns[c]).length;
 
   async function importCsv(file: File) {
@@ -31,7 +41,8 @@ export default function SettingsPage() {
     const note = r.fromVersion === 1 ? `\n\nThis is an older (v1) backup. It will be converted: Reading IDs assigned by date/time${r.skipped ? `, ${r.skipped} Dry/No-reading entr${r.skipped === 1 ? 'y' : 'ies'} without a depth dropped` : ''}.` : '';
     if (!confirm(`Replace ALL data on this device (${boreholes.length} boreholes, ${readings.length} readings) with the backup from ${b.exportedAt.slice(0, 10) || 'unknown date'} (${b.boreholes.length} boreholes, ${b.readings.length} readings)?${note}`)) return;
     await replaceAll(b.boreholes, b.readings, b.nextReadingId);
-    setSettings({ ...b.settings });
+    // The User Code belongs to this phone, not the backup: keep the current one.
+    setSettings({ ...b.settings, userCode: settings.userCode });
     await reload();
     setMsg({ kind: 'ok', text: `Restored ${b.boreholes.length} boreholes and ${b.readings.length} readings${r.fromVersion === 1 ? ' (converted from v1)' : ''}.` });
   }
@@ -47,6 +58,15 @@ export default function SettingsPage() {
   return (
     <section className="form">
       <h2>Settings</h2>
+      <label>User Code (this phone)
+        <span className="ucrow">
+          <input value={code} onChange={(e) => { setCode(e.target.value); setCodeMsg(undefined); }} maxLength={USER_CODE_MAX + 5} autoCapitalize="characters"
+            autoCorrect="off" spellCheck={false} placeholder="e.g. OD-1" data-testid="uc-input" onKeyDown={(e) => { if (e.key === 'Enter') saveCode(); }} />
+          <button type="button" className="primary" onClick={saveCode} disabled={normalizeUserCode(code) === settings.userCode} data-testid="uc-save">Save</button>
+        </span>
+      </label>
+      <p className="muted small">Recorded on every new reading, like the date and time. Up to {USER_CODE_MAX} letters, numbers, - or _. Changing it does not alter earlier readings.</p>
+      {codeMsg && <p className={codeMsg.kind === 'error' ? 'error' : 'ok'} role="status" data-testid="uc-msg">{codeMsg.text}</p>}
       <fieldset className="seg" aria-label="Units">
         <legend>Units</legend>
         {(['ft', 'm'] as const).map((x) => <button key={x} type="button" className={u === x ? 'on' : ''} aria-pressed={u === x} onClick={() => set({ unit: x })} data-testid={`unit-${x}`}>{x === 'ft' ? 'Feet' : 'Meters'}</button>)}

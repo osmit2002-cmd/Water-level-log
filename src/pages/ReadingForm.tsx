@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useStore } from '../store';
 import { addReading, deleteReading, updateReading } from '../lib/db';
+import UserCodeSheet from '../UserCodeSheet';
 import { fmt2, fmtLen, fromUnit, nowLocal, parseDecimal, round2, toUnit } from '../lib/math';
 
 const LAST_BH = 'wll-last-borehole';
@@ -9,7 +10,8 @@ const LAST_BH = 'wll-last-borehole';
 export default function ReadingForm() {
   const { id: idParam } = useParams();
   const [qs] = useSearchParams();
-  const { boreholes, bhMap, readings, settings, reload } = useStore();
+  const { boreholes, bhMap, readings, settings, setSettings, reload } = useStore();
+  const [askCode, setAskCode] = useState(false);
   const u = settings.unit;
   const nav = useNavigate();
   const old = idParam ? readings.find((r) => String(r.id) === idParam) : undefined;
@@ -19,6 +21,7 @@ export default function ReadingForm() {
   const [notes, setNotes] = useState(old?.notes ?? '');
   const [err, setErr] = useState('');
   const [saving, setSaving] = useState(false);
+  const committing = useRef(false);
   const [clock, setClock] = useState(nowLocal());
   useEffect(() => { if (old) return; const t = setInterval(() => setClock(nowLocal()), 5000); return () => clearInterval(t); }, [old]);
 
@@ -40,6 +43,13 @@ export default function ReadingForm() {
     if (!b && !old) return setErr('Pick a borehole');
     if (!depth.trim() || !Number.isFinite(depthNum)) return setErr('Enter the depth to top of water');
     if (depthNum < 0) return setErr('Depth to top of water cannot be negative');
+    // New readings need this phone's User Code; ask for it without leaving (or clearing) the form.
+    if (!old && !settings.userCode) return setAskCode(true);
+    await commit(settings.userCode);
+  }
+  async function commit(userCode: string) {
+    if (committing.current) return;
+    committing.current = true;
     setSaving(true);
     const now = new Date();
     try {
@@ -48,10 +58,10 @@ export default function ReadingForm() {
       } else {
         // Date and time come from the phone clock at the moment of saving; reference values are snapshotted.
         await addReading({ borehole: bh, datetime: nowLocal(now), referencePoint: b!.referencePoint, refElevationFt: b!.refElevationFt,
-          depthFt: depthFt!, notes: notes.trim() || undefined, createdAt: now.toISOString(), updatedAt: now.toISOString() });
+          depthFt: depthFt!, userCode, notes: notes.trim() || undefined, createdAt: now.toISOString(), updatedAt: now.toISOString() });
         localStorage.setItem(LAST_BH, bh);
       }
-    } catch (x) { setSaving(false); return setErr(`Could not save: ${(x as Error).message}`); }
+    } catch (x) { committing.current = false; setSaving(false); return setErr(`Could not save: ${(x as Error).message}`); }
     await reload();
     nav(`/borehole/${encodeURIComponent(old?.borehole ?? bh)}`, { replace: !!old });
   }
@@ -83,10 +93,14 @@ export default function ReadingForm() {
         {old
           ? <>Recorded <b>{old.datetime.slice(0, 10)}</b> at <b>{old.datetime.slice(11, 16)}</b> (phone clock). Date and time can't be edited.</>
           : <>Date and time are taken from this phone's clock when you tap Save (now {clock.replace('T', ' ')}).</>}
+        <br />{old
+          ? <>User Code: <b data-testid="rd-code">{old.userCode || '—'}</b> (as recorded).</>
+          : <>User Code: <b data-testid="rd-code">{settings.userCode || 'not set'}</b>{settings.userCode ? ' (from Settings)' : ' — you will be asked on Save'}.</>}
       </div>
       {err && <p className="error" role="alert">{err}</p>}
       <button type="submit" className="primary" data-testid="rd-save" disabled={saving}>Save reading</button>
       {old && <button type="button" className="danger" onClick={remove}>Delete reading</button>}
+      {askCode && <UserCodeSheet onCancel={() => setAskCode(false)} onSave={(code) => { setSettings({ ...settings, userCode: code }); setAskCode(false); void commit(code); }} />}
     </form>
   );
 }

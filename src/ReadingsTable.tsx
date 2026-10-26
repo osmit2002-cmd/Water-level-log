@@ -12,6 +12,7 @@ export default function ReadingsTable({ rows, unit: u, columns, testid }: { rows
       case 'boreholeName': return r.borehole;
       case 'date': return r.datetime.slice(0, 10);
       case 'time': return r.datetime.slice(11, 16);
+      case 'userCode': return r.userCode;
       case 'referencePoint': return r.referencePoint;
       case 'refElevation': return fmtLen(r.refElevationFt, u);
       case 'depth': return fmtLen(r.depthFt, u);

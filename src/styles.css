@@ -81,3 +81,8 @@ td.notes { min-width: 140px; white-space: normal; }
 .toggle:last-of-type { border-bottom: 0; }
 .toggle input { width: 30px; height: 30px; min-height: 0; flex: none; accent-color: var(--accent); }
 .stamp { border: 2px dashed var(--line); border-radius: 10px; padding: 10px 12px; }
+.backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: flex; align-items: flex-end; z-index: 50; }
+.sheet { width: 100%; background: var(--bg); color: var(--fg); border-top: 3px solid var(--accent); border-radius: 16px 16px 0 0; padding: 16px calc(env(safe-area-inset-right) + 16px) calc(env(safe-area-inset-bottom) + 16px) calc(env(safe-area-inset-left) + 16px); display: flex; flex-direction: column; gap: 10px; }
+.sheet h3 { margin: 0; }
+.ucrow { display: flex; gap: 8px; align-items: stretch; }
+.ucrow input { flex: 1; }
