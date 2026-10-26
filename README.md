@@ -5,6 +5,7 @@ Offline borehole water-level log for iPhone (and any modern browser). Install it
 ## Features
 - **Boreholes:** Borehole Name, Reference Point (top of casing, collar, …) and Reference Elevation. The name is the borehole's one identifier and must be unique (not case-sensitive). It can be renamed, and the rename carries into all of that borehole's readings. Deleting a borehole removes its readings after a confirm.
 - **Readings:** pick the borehole and enter the **depth to top of water** (required, 2 decimals, not negative) and optional notes. The **date and time are taken from the phone's clock when you tap Save**; there is no date/time field. Editing a reading keeps its original date and time.
+  - **User Code (0.3.0):** each reading records who took it. Set the code once per phone in Settings → User Code (up to 20 letters, numbers, `-` or `_`; saved in capitals). If none is set, the first Save opens a sheet asking for it; the code is saved to Settings and the reading is then saved, nothing typed is lost (Cancel returns to the form). Editing a reading keeps its original code. Readings from before 0.3.0 (including migrated and restored v1/v2 data) have a blank code. Restoring a backup keeps this phone's code. The CSV gets a `User Code` column after Time, with its own switch in Report columns (on by default).
   - **Reading ID:** a sequential number (1, 2, 3, …) assigned at save. Deleted IDs are never reused.
   - Water Elevation = Reference Elevation − Depth to top of water.
   - Each reading stores the Reference Point and Reference Elevation in use when it was taken, so editing a borehole later never rewrites history.
@@ -13,15 +14,15 @@ Offline borehole water-level log for iPhone (and any modern browser). Install it
 - **Units:** feet (default) or meters. Data is stored in feet and converted for display, entry and export.
 - **CSV export:** UTF-8 BOM, RFC 4180 quoting, and a guard against formula injection in text cells. The filename is `waterlevels_<borehole|all>_<YYYY-MM-DD>.csv`. On iPhone it opens the share sheet ("Save to Files"); elsewhere it downloads.
   Columns, in this order (the enabled ones only):
-  `Reading ID, Borehole Name, Date, Time, Reference Point, Reference Elevation (ft), Depth to Top of Water (ft), Water Elevation (ft), Notes`. In meters the headers end in `(m)`.
+  `Reading ID, Borehole Name, Date, Time, User Code, Reference Point, Reference Elevation (ft), Depth to Top of Water (ft), Water Elevation (ft), Notes`. In meters the headers end in `(m)`.
 - **Boreholes CSV export and import** (Settings): `Borehole Name, Reference Point, Reference Elevation (ft)` (or `(m)`). Name and elevation are required. Rows are upserted by name and bad rows are listed with line numbers.
-- **JSON backup and restore:** `water-level-log-backup` version 2, validated before use, with a confirm before it replaces all data. Version-1 backups from 0.1.0 are converted:
+- **JSON backup and restore:** `water-level-log-backup` version 3, validated before use, with a confirm before it replaces all data. Version-2 backups (0.2.0) restore with a blank User Code on every reading. Version-1 backups from 0.1.0 are converted:
   - The Borehole Name is the old name, or the old ID if there was no name.
   - Reading IDs are assigned in date/time order.
   - Change, status, reader, total depth, location, lat/long and borehole notes are dropped. Dry / No-reading entries have no depth, so they are skipped, and the confirm says how many.
 
   iOS can clear website storage, so save a backup to Files regularly. The app also requests persistent storage.
-- **Upgrading from 0.1.0:** data already on the phone is migrated the same way the first time 0.2.0 opens. The untouched 0.1.0 records are also kept in an internal archive record.
+- **Upgrading from 0.1.0:** data already on the phone is migrated the same way the first time 0.2.0 or later opens. The untouched 0.1.0 records are also kept in an internal archive record.
 - **Field-ready:** high-contrast "Sunlight" light theme, dark mode (follows the system or can be set), large touch targets, decimal keypad, safe-area insets, and an Add to Home Screen tip in iOS Safari.
 
 ## Develop
