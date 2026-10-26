@@ -12,6 +12,9 @@ class FakeRange {
   }
   setValues(v) {
     if (v.length !== this.nr || v.some((row) => row.length !== this.nc)) throw new Error('setValues: size mismatch');
+    if (this.r - 1 + this.nr > this.sh.maxRows) throw new Error('The coordinates of the range are outside the dimensions of the sheet.');
+    // Like Sheets: a leading ' only marks the cell as literal text (kept in .quoted for assertions) and is not stored.
+    v = v.map((row) => row.map((x) => { if (typeof x === 'string' && x.charAt(0) === "'") { this.sh.quoted.add(x.slice(1)); return x.slice(1); } return x; }));
     v.forEach((row, i) => row.forEach((x, j) => { (this.sh.data[this.r - 1 + i] ??= [])[this.c - 1 + j] = x; }));
     this.sh.writes++;
     return this;
@@ -20,11 +23,12 @@ class FakeRange {
   setNumberFormat(f) { this.sh.formats.push([this.c, f]); return this; }
 }
 export class FakeSheet {
-  constructor(name) { this.name = name; this.data = []; this.formats = []; this.writes = 0; this.frozen = 0; }
+  constructor(name) { this.name = name; this.data = []; this.formats = []; this.writes = 0; this.frozen = 0; this.maxRows = 1000; this.quoted = new Set(); }
   trim() { while (this.data.length && this.data[this.data.length - 1].every((x) => x === '' || x == null)) this.data.pop(); }
   getLastRow() { this.trim(); return this.data.length; }
   getLastColumn() { return Math.max(0, ...this.data.map((r) => r.length)); }
-  getMaxRows() { return 1000; }
+  getMaxRows() { return this.maxRows; }
+  insertRowsAfter(after, n) { if (after > this.maxRows) throw new Error('bad row'); this.maxRows += n; return this; }
   getRange(r, c, nr = 1, nc = 1) { return new FakeRange(this, r, c, nr, nc); }
   setFrozenRows(n) { this.frozen = n; }
   /** Header + rows as objects keyed by header text (for assertions). */

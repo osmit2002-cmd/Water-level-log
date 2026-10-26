@@ -155,7 +155,13 @@ export async function addReading(r: Omit<Reading, 'id'>): Promise<number> {
     const rs = tx.objectStore('readings');
     let id = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
     while (await rs.getKey(id)) id++; // defensive: never overwrite
-    const seq = r.seq ?? (((await meta.get(NEXT_SEQ))?.value as number | undefined) ?? id);
+    let seq = r.seq;
+    if (seq === undefined) {
+      // Never reuse a number this User Code already has (e.g. after a reinstall, readings come back from the sheet).
+      seq = ((await meta.get(NEXT_SEQ))?.value as number | undefined) ?? id;
+      const code = r.userCode ?? '';
+      for (const o of await rs.getAll()) if ((o.userCode ?? '') === code && (o.seq ?? o.id) >= seq) seq = (o.seq ?? o.id) + 1;
+    }
     const full: Reading = { ...r, id, uid: r.uid ?? uuid(), boreholeUid, seq };
     await rs.add(full);
     await meta.put({ key: NEXT_ID, value: id + 1 });
@@ -235,7 +241,7 @@ export async function deleteBorehole(name: string) {
   const now = new Date().toISOString();
   for (const r of await rs.index('byBorehole').getAll(name)) {
     await rs.delete(r.id);
-    if (r.uid) await tombstone(tx, { uid: r.uid, kind: 'reading', deletedAt: now }, false); // the server cascades from the borehole tombstone
+    if (r.uid) await tombstone(tx, { uid: r.uid, kind: 'reading', deletedAt: now }); // sent too, in case the sheet already merged this borehole
   }
   const b = await tx.objectStore('boreholes').get(name);
   await tx.objectStore('boreholes').delete(name);
@@ -280,7 +286,8 @@ export async function replaceAll(boreholes: Borehole[], readings: Reading[], nex
   const dead = new Set((await tx.objectStore('tombstones').getAllKeys()) as string[]);
   await tx.objectStore('boreholes').clear();
   await tx.objectStore('readings').clear();
-  await tx.objectStore('outbox').clear();
+  // Keep queued deletes so other phones still learn about them; drop queued borehole/reading upserts (re-queued below).
+  for (const k of (await tx.objectStore('outbox').getAllKeys()) as string[]) if (!k.startsWith('t:')) await tx.objectStore('outbox').delete(k);
   const uidOf = new Map<string, string>();
   for (const b0 of boreholes) {
     const b = fillBorehole(b0);
@@ -316,7 +323,7 @@ export async function queueEverything() {
     if (!r.uid || !r.boreholeUid) continue;
     if (!(await tx.objectStore('outbox').getKey(`r:${r.uid}`))) await queue(tx, 'reading', toRRec(r));
   }
-  for (const t of await tx.objectStore('tombstones').getAll()) if (!t.mergedInto && t.kind === 'borehole') await queue(tx, 'tombstone', t);
+  for (const t of await tx.objectStore('tombstones').getAll()) if (!t.mergedInto && !(await tx.objectStore('outbox').getKey(`t:${t.uid}`))) await queue(tx, 'tombstone', t);
   await tx.done;
 }
 
@@ -331,6 +338,7 @@ export async function outboxAck(sent: OutboxItem[], acked: string[]) {
   }
   await tx.done;
 }
+export async function resetCursor() { await (await db()).put('meta', { key: CURSOR, value: 0 }); }
 export async function getCursor() { return ((await (await db()).get('meta', CURSOR))?.value as number | undefined) ?? 0; }
 
 export { rw as _rw, putBorehole as _putBorehole, tombstone as _tombstone, queue as _queue };

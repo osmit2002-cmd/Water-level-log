@@ -37,6 +37,8 @@ Several phones share one borehole list and one pool of readings through **a Goog
 - **Deletes** become tombstones on the Sheet (`Tombstones` tab). A deleted reading or borehole never comes back from another phone, even if that phone edits it later. Deleting a borehole deletes its readings everywhere.
 - **Backup/restore with sync on:** a restore replaces this phone's data and re-queues all of it. It is merged into the Sheet by the rules above. **It does not delete anything from the Sheet**, and items deleted elsewhere stay deleted.
 - **Security:** anyone with the URL **and** team code can read and write. To revoke access, change the code (see the setup guide). The Sheet is on the owner's Google account.
+- **Restoring an old (v1–v3) backup is refused while sync is on**, because those backups have no sync IDs and every record would be added to the sheet a second time. Turn sync off first (and only turn it back on if that phone's data is not already on the sheet).
+- **Known limits (0.4.0):** a reading's depth and notes share one edit time (newest reading edit wins as a whole). Renaming a borehole and creating a new borehole with its old name in the same offline session can be treated as a same-name merge (flagged). An edit form left open while a sync changes the same record can overwrite the other phone's change when saved. A reading taken offline in a borehole another phone deleted is deleted with it. Changes the sheet rejects as invalid stay "waiting". Anyone with the URL and code could delete data; the Sheet's *File → Version history* is the way back.
 - Backup format is now version 4 (keeps UUIDs and edit times); versions 1–3 still restore.
 
 ## Develop

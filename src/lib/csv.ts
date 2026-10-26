@@ -75,7 +75,7 @@ export function readingsHeader(u: Unit, cols: Columns): string[] {
 function readingCell(r: DerivedReading, c: ColumnKey, u: Unit): string {
   const L = (ft: number) => numCell(toUnit(ft, u));
   switch (c) {
-    case 'readingId': return displayId(r);
+    case 'readingId': return textCell(displayId(r));
     case 'boreholeName': return textCell(r.borehole);
     case 'date': return r.datetime.slice(0, 10);
     case 'time': return r.datetime.slice(11, 16);

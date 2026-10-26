@@ -152,3 +152,30 @@ describe('two phones through the real Apps Script logic', () => {
     expect(await on(A, snapshot)).toEqual(await on(B, snapshot));
   });
 });
+
+describe('review fixes (0.4.0)', () => {
+  it('a restore keeps queued deletes; queueEverything re-sends reading tombstones', async () => {
+    await on(phone(), async () => {
+      await db.saveBorehole(bh('MW-1'));
+      await db.addReading(rd('MW-1', 10));
+      const r = (await db.allReadings())[0];
+      await db.deleteReading(r.id);
+      await db.replaceAll(await db.allBoreholes(), [], 2);
+      expect((await db.outboxAll()).some((o) => o.key === `t:${r.uid}`)).toBe(true);
+    });
+  });
+  it('a reinstalled phone never reuses a display number that came back from the sheet', async () => {
+    const env = fakeEnv();
+    const a = phone(), a2 = phone();
+    await on(a, async () => {
+      await db.saveBorehole(bh('MW-1'));
+      await db.addReading(rd('MW-1', 10)); await db.addReading(rd('MW-1', 11));
+      await syncOnce(new CodeGsAdapter(env));
+    });
+    await on(a2, async () => {
+      await syncOnce(new CodeGsAdapter(env));
+      await db.addReading(rd('MW-1', 12));
+      expect((await db.allReadings()).map(displayId).sort()).toEqual(['OD-0001', 'OD-0002', 'OD-0003']);
+    });
+  });
+});

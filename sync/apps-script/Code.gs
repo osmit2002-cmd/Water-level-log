@@ -35,8 +35,8 @@ function doPost(e) {
 }
 function doGet(e) {
   var p = (e && e.parameter) || {};
-  if (!p.team) return json_({ ok: true, message: 'Water Level Log sync is running. Enter this URL and the team code in the app.' });
-  return json_(handleRequest_(JSON.stringify({ team: p.team, op: p.op || 'pull', since: Number(p.since || 0) }), liveEnv_()));
+  // Only a health check: data is never served over GET, so the team code never has to go in a URL.
+  return json_({ ok: true, message: 'Water Level Log sync is running. Enter this URL and the team code in the app.' });
 }
 function liveEnv_() {
   return { ss: SpreadsheetApp.getActiveSpreadsheet(), props: PropertiesService.getScriptProperties(), lock: LockService.getScriptLock(), now: function () { return new Date().toISOString(); } };
@@ -68,6 +68,7 @@ function handleRequest_(text, env) {
   try { env.lock.waitLock(25000); } catch (err) { return { ok: false, error: 'The sheet is busy, try again' }; }
   try {
     var db = loadAll_(env.ss);
+    db.rev = maxRev_(db, env);
     var out = req.op === 'push' ? push_(db, req, env) : pull_(db, Number(req.since) || 0, env);
     if (req.op === 'push') saveAll_(db, env);
     return out;
@@ -100,8 +101,7 @@ function toCell_(k, v) {
 function fromCell_(k, v) {
   if (NUMERIC_[k]) return v === '' || v === null ? null : Number(v);
   if (v instanceof Date) return k === 'date' ? v.toISOString().slice(0, 10) : v.toISOString();
-  var s = String(v === undefined || v === null ? '' : v);
-  return s.charAt(0) === "'" ? s.slice(1) : s;
+  return String(v === undefined || v === null ? '' : v); // Sheets drops the leading ' that toCell_ adds
 }
 function loadTable_(ss, name) {
   var sh = sheetFor_(ss, name), cols = COLS_[name];
@@ -126,13 +126,25 @@ function saveTable_(t) {
     for (var c = 0; c < cols.length; c++) row[t.idx[c]] = toCell_(cols[c][0], o[cols[c][0]]);
     return row;
   });
-  if (t.oldCount > 0) t.sheet.getRange(2, 1, t.oldCount, w).clearContent();
-  if (out.length) t.sheet.getRange(2, 1, out.length, w).setValues(out);
+  var sh = t.sheet, need = out.length + 1;
+  if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows() + 100);
+  if (t.oldCount > 0) sh.getRange(2, 1, t.oldCount, w).clearContent();
+  if (out.length) {
+    // Keep text columns as plain text on every write (new rows past the first format do not inherit it).
+    for (var c = 0; c < cols.length; c++) if (!NUMERIC_[cols[c][0]]) sh.getRange(2, t.idx[c] + 1, out.length, 1).setNumberFormat('@');
+    sh.getRange(2, 1, out.length, w).setValues(out);
+  }
 }
 function loadAll_(ss) {
   var db = { B: loadTable_(ss, 'Boreholes'), R: loadTable_(ss, 'Readings'), T: loadTable_(ss, 'Tombstones') };
   db.b = byUid_(db.B.rows); db.r = byUid_(db.R.rows); db.t = byUid_(db.T.rows);
   return db;
+}
+/** Current revision: never lower than any row's Rev (e.g. if the sheet was copied without its Script Properties). */
+function maxRev_(db, env) {
+  var m = rev_(env), all = db.B.rows.concat(db.R.rows, db.T.rows);
+  for (var i = 0; i < all.length; i++) if (Number(all[i].rev) > m) m = Number(all[i].rev);
+  return m;
 }
 function saveAll_(db, env) { saveTable_(db.B); saveTable_(db.R); saveTable_(db.T); env.props.setProperty('REV', String(db.rev || rev_(env))); }
 function byUid_(rows) { var m = {}; for (var i = 0; i < rows.length; i++) m[rows[i].uid] = rows[i]; return m; }
@@ -286,7 +298,7 @@ function pull_(db, since, env) {
   var after = function (x) { return Number(x.rev) > since; };
   return {
     ok: true,
-    cursor: rev_(env),
+    cursor: db.rev,
     boreholes: db.B.rows.filter(after).map(function (b) {
       return { uid: b.uid, name: b.name, referencePoint: b.referencePoint, refElevationFt: b.refElevationFt, flag: b.flag || '', nameAt: b.nameAt, referencePointAt: b.referencePointAt,
         refElevationAt: b.refElevationAt, flagAt: b.flagAt, createdAt: b.createdAt, updatedAt: b.updatedAt };

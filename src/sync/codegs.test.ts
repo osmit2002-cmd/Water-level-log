@@ -41,7 +41,8 @@ describe('Apps Script: sheets', () => {
     push([bh()], [rd({ notes: '=HYPERLINK("x")' })]);
     const R = sheet('Readings');
     expect(R.data[0].slice(0, 10)).toEqual(['Reading ID', 'Borehole Name', 'Date', 'Time', 'User Code', 'Reference Point', 'Reference Elevation (ft)', 'Depth to Top of Water (ft)', 'Water Elevation (ft)', 'Notes']);
-    expect(R.objects()[0]).toMatchObject({ 'Reading ID': 'OD-0001', 'Borehole Name': 'MW-1', Date: '2026-10-26', Time: '09:15', 'Water Elevation (ft)': 90, Notes: '\'=HYPERLINK("x")' });
+    expect(R.objects()[0]).toMatchObject({ 'Reading ID': 'OD-0001', 'Borehole Name': 'MW-1', Date: '2026-10-26', Time: '09:15', 'Water Elevation (ft)': 90, Notes: '=HYPERLINK("x")' });
+    expect(R.quoted.has('=HYPERLINK("x")')).toBe(true); // written with a leading ' so Sheets keeps it as text
     expect(sheet('Boreholes').data[0].slice(0, 3)).toEqual(['Borehole Name', 'Reference Point', 'Reference Elevation (ft)']);
     expect(sheet('Tombstones').data[0]).toEqual(['Kind', 'UID', 'Deleted At', 'Merged Into', 'Rev']);
     expect(R.frozen).toBe(1);
@@ -126,5 +127,31 @@ describe('Apps Script: tombstones', () => {
     // a repeated tombstone is harmless
     push([], [], [{ uid: 'r1', kind: 'reading', deletedAt: T3 }]);
     expect(sheet('Tombstones').objects().filter((t) => t.UID === 'r1')).toHaveLength(1);
+  });
+});
+
+describe('Apps Script: review fixes (0.4.0)', () => {
+  it('grows the sheet past its first 1000 rows', () => {
+    push([bh()]);
+    for (let k = 0; k < 3; k++) {
+      const rs = Array.from({ length: 450 }, (_, i) => rd({ uid: `r${k}-${i}`, seq: k * 450 + i + 1, displayId: `OD-${k * 450 + i + 1}` }));
+      expect(push([], rs)).toMatchObject({ ok: true });
+    }
+    expect(sheet('Readings').objects().length).toBe(1350);
+    expect(pull(0).readings.length).toBe(1350);
+  });
+  it('a value starting with an apostrophe or = round-trips unchanged and never becomes a formula', () => {
+    push([bh()], [rd({ notes: "'quoted" }), rd({ uid: 'r2', notes: '=SUM(A1)' })]);
+    const notes = pull(0).readings.map((r: ReadingRec) => r.notes).sort();
+    expect(notes).toEqual(["'quoted", '=SUM(A1)']);
+    expect(sheet('Readings').quoted.has('=SUM(A1)') && sheet('Readings').quoted.has("'quoted")).toBe(true);
+  });
+  it('the cursor never goes back if the REV property is lost (e.g. a copied sheet)', () => {
+    push([bh()], [rd()]);
+    const c = pull(0).cursor;
+    env._store.delete('REV');
+    expect(pull(0).cursor).toBe(c);
+    push([], [rd({ uid: 'r9', seq: 9 })]);
+    expect(pull(c).readings.map((r: ReadingRec) => r.uid)).toEqual(['r9']);
   });
 });

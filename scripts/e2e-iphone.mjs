@@ -349,7 +349,7 @@ await waitBadge(pa, 'synced');
 ok((await pa.textContent('[data-testid=sync-badge]')) === 'All synced', 'badge: All synced');
 const aCount = (await pa.evaluate(() => new Promise((res) => { const rq = indexedDB.open('water-level-log'); rq.onsuccess = () => { const g = rq.result.transaction('readings').objectStore('readings').count(); g.onsuccess = () => { res(g.result); rq.result.close(); }; }; })));
 ok(sheetRows('Readings').length === aCount && sheetRows('Boreholes').length === 2, `existing data uploaded to the Sheet (${sheetRows('Readings').length} readings, ${sheetRows('Boreholes').length} boreholes)`);
-ok(sheetRows('Readings').some((r) => r['Reading ID'] === 'OD-1-0001' && r['Borehole Name'] === 'North Pad 1' && r.Notes === "'=SUM(A1)"), 'Sheet rows are readable (Reading ID, Borehole Name) and formula-guarded');
+ok(sheetRows('Readings').some((r) => r['Reading ID'] === 'OD-1-0001' && r['Borehole Name'] === 'North Pad 1' && r.Notes === '=SUM(A1)' && server.ss.getSheetByName('Readings').quoted.has('=SUM(A1)')), 'Sheet rows are readable (Reading ID, Borehole Name) and formula-guarded');
 ok((await pa.textContent('[data-testid=sync-last]')) !== 'Never', `last synced time shown (${await pa.textContent('[data-testid=sync-last]')})`);
 if (shots) { await pa.evaluate(() => document.querySelector('[data-testid=sync-section]').scrollIntoView({ block: 'start' })); await pa.screenshot({ path: `${shots}/8-sync-settings-on.png` }); }
 

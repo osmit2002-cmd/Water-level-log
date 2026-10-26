@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { QUEUED_EVENT, outboxCount, queueEverything } from '../lib/db';
+import { QUEUED_EVENT, outboxCount, queueEverything, resetCursor } from '../lib/db';
 import { useStore } from '../store';
 import { syncOnce } from './engine';
 import { SheetsAdapter, syncUrlError } from './sheets';
@@ -120,6 +120,7 @@ export function SyncProvider({ children }: { children: ReactNode }) {
     const st = await makeAdapter(url, team).status();
     if (!st.ok) return st.message;
     await queueEverything();
+    await resetCursor(); // this may be a different sheet than last time: pull everything
     setConfig({ enabled: true, url, team, lastError: undefined });
     await run();
     return cfgRef.current.lastError ?? '';
