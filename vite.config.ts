@@ -19,7 +19,7 @@ export default defineConfig({
       manifest: {
         name: 'Water Level Log',
         short_name: 'Water Levels',
-        description: 'Offline borehole water level log. All data stays on this device.',
+        description: 'Offline borehole water level log. Works offline; optional team sync via a Google Sheet.',
         start_url: './',
         scope: './',
         display: 'standalone',
