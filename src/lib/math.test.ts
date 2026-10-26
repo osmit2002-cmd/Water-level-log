@@ -4,7 +4,7 @@ import type { Reading } from './types';
 
 let n = 0;
 const R = (borehole: string, datetime: string, depthFt: number, refElevationFt = 100): Reading =>
-  ({ id: ++n, borehole, datetime, depthFt, refElevationFt, referencePoint: 'top of casing', createdAt: '', updatedAt: '' });
+  ({ id: ++n, borehole, datetime, depthFt, refElevationFt, referencePoint: 'top of casing', userCode: '', createdAt: '', updatedAt: '' });
 
 describe('rounding and units', () => {
   it('rounds to 2 dp without float artefacts', () => {

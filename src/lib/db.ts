@@ -53,7 +53,8 @@ export function db() {
 }
 
 export const allBoreholes = async () => (await db()).getAll('boreholes');
-export const allReadings = async () => (await db()).getAll('readings');
+// Readings saved before 0.3.0 have no userCode: treat as blank.
+export const allReadings = async () => (await db()).getAll('readings').then((rs) => rs.map((r) => ({ ...r, userCode: r.userCode ?? '' })));
 export async function getNextReadingId(): Promise<number> {
   return ((await (await db()).get('meta', NEXT_ID))?.value as number | undefined) ?? 1;
 }

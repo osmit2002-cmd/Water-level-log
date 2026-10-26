@@ -1,13 +1,13 @@
 import type { Borehole, Reading, Settings } from './types';
-import { normalizeSettings } from './types';
+import { normalizeSettings, normalizeUserCode, userCodeError } from './types';
 import { migrateV1, type V1Borehole, type V1Reading } from './migrate';
 
 export const BACKUP_FORMAT = 'water-level-log-backup' as const;
-export const BACKUP_VERSION = 2;
+export const BACKUP_VERSION = 3;
 
 export interface Backup {
   format: typeof BACKUP_FORMAT;
-  version: 2;
+  version: 3;
   exportedAt: string;
   app: string;
   settings: Settings;
@@ -57,15 +57,15 @@ function validateV1(o: Record<string, unknown>): { boreholes: V1Borehole[]; read
   return { boreholes: o.boreholes as V1Borehole[], readings: o.readings as V1Reading[] };
 }
 
-/** Validate a parsed backup (v1 is migrated to v2). Returns the cleaned v2 backup or throws with a readable message. */
+/** Validate a parsed backup (v1 is migrated; v1/v2 readings get a blank User Code). Returns the cleaned v3 backup or throws with a readable message. */
 export function validateBackup(x: unknown): RestoreResult {
   if (!x || typeof x !== 'object') fail('Not a backup file');
   const o = x as Record<string, unknown>;
   if (o.format !== BACKUP_FORMAT) fail('Not a Water Level Log backup');
-  if (o.version !== 1 && o.version !== 2) fail(typeof o.version === 'number' && o.version > BACKUP_VERSION ? `Backup version ${o.version} is newer than this app supports` : 'Unknown backup version');
+  if (o.version !== 1 && o.version !== 2 && o.version !== 3) fail(typeof o.version === 'number' && o.version > BACKUP_VERSION ? `Backup version ${o.version} is newer than this app supports` : 'Unknown backup version');
   if (!Array.isArray(o.boreholes) || !Array.isArray(o.readings)) fail('Backup is missing boreholes or readings');
   const now = new Date().toISOString();
-  const head = { format: BACKUP_FORMAT, version: 2 as const, exportedAt: String(o.exportedAt ?? ''), app: String(o.app ?? ''), settings: normalizeSettings(o.settings) };
+  const head = { format: BACKUP_FORMAT, version: 3 as const, exportedAt: String(o.exportedAt ?? ''), app: String(o.app ?? ''), settings: normalizeSettings(o.settings) };
 
   if (o.version === 1) {
     const v1 = validateV1(o);
@@ -95,13 +95,14 @@ export function validateBackup(x: unknown): RestoreResult {
     if (typeof r.datetime !== 'string' || !DT.test(r.datetime)) fail(`${at}: bad date/time`);
     if (!isNum(r.depthFt) || (r.depthFt as number) < 0) fail(`${at}: bad depth`);
     if (!isNum(r.refElevationFt)) fail(`${at}: bad reference elevation`);
-    if (!optStr(r.notes) || !optStr(r.referencePoint)) fail(`${at}: bad text field`);
+    if (!optStr(r.notes) || !optStr(r.referencePoint) || !optStr(r.userCode)) fail(`${at}: bad text field`);
+    if (o.version === 3 && r.userCode && normalizeUserCode(r.userCode as string) && userCodeError(normalizeUserCode(r.userCode as string))) fail(`${at}: bad User Code`);
     ids.add(r.id as number);
     return { id: r.id as number, borehole: (r.borehole as string).trim(), datetime: (r.datetime as string).slice(0, 16), referencePoint: String(r.referencePoint ?? ''),
-      refElevationFt: r.refElevationFt as number, depthFt: r.depthFt as number, notes: (r.notes as string | undefined)?.trim() || undefined,
+      refElevationFt: r.refElevationFt as number, depthFt: r.depthFt as number, userCode: o.version === 3 && r.userCode ? normalizeUserCode(r.userCode as string) : '', notes: (r.notes as string | undefined)?.trim() || undefined,
       createdAt: String(r.createdAt ?? now), updatedAt: String(r.updatedAt ?? now) };
   });
   const maxId = Math.max(0, ...ids);
   const next = Number.isSafeInteger(o.nextReadingId) ? Math.max(o.nextReadingId as number, maxId + 1) : maxId + 1;
-  return { backup: { ...head, nextReadingId: next, boreholes, readings }, fromVersion: 2, skipped: 0 };
+  return { backup: { ...head, nextReadingId: next, boreholes, readings }, fromVersion: o.version as number, skipped: 0 };
 }

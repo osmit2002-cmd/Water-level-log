@@ -57,6 +57,7 @@ export function columnLabel(c: ColumnKey, u: Unit): string {
     case 'boreholeName': return 'Borehole Name';
     case 'date': return 'Date';
     case 'time': return 'Time';
+    case 'userCode': return 'User Code';
     case 'referencePoint': return 'Reference Point';
     case 'refElevation': return `Reference Elevation (${u})`;
     case 'depth': return `Depth to Top of Water (${u})`;
@@ -77,6 +78,7 @@ function readingCell(r: DerivedReading, c: ColumnKey, u: Unit): string {
     case 'boreholeName': return textCell(r.borehole);
     case 'date': return r.datetime.slice(0, 10);
     case 'time': return r.datetime.slice(11, 16);
+    case 'userCode': return textCell(r.userCode);
     case 'referencePoint': return textCell(r.referencePoint);
     case 'refElevation': return L(r.refElevationFt);
     case 'depth': return L(r.depthFt);

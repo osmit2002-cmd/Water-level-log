@@ -5,8 +5,8 @@ import { ALL_COLUMNS, type Borehole, type Reading } from './types';
 
 const bh: Borehole = { name: 'North, "old" well', referencePoint: 'top of casing', refElevationFt: 1050.5, createdAt: '', updatedAt: '' };
 const rd = (id: number, datetime: string, depthFt: number, notes?: string): Reading =>
-  ({ id, borehole: bh.name, datetime, depthFt, refElevationFt: 1050.5, referencePoint: 'top of casing', notes, createdAt: '', updatedAt: '' });
-const HEADER_FT = 'Reading ID,Borehole Name,Date,Time,Reference Point,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft),Notes';
+  ({ id, borehole: bh.name, datetime, depthFt, refElevationFt: 1050.5, referencePoint: 'top of casing', userCode: 'JD', notes, createdAt: '', updatedAt: '' });
+const HEADER_FT = 'Reading ID,Borehole Name,Date,Time,User Code,Reference Point,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft),Notes';
 
 describe('escaping', () => {
   it('quotes per RFC 4180', () => {
@@ -34,26 +34,26 @@ describe('parsing', () => {
 
 describe('readings CSV', () => {
   const rs = deriveReadings([rd(1, '2026-01-01T08:00', 20.1), rd(3, '2026-01-03T10:30', 19.6, '=evil'), rd(2, '2026-01-02T09:05', 21, 'a,"b"')]);
-  it('has BOM, the 9 columns in order with readable headers, CRLF and 2 dp numbers', () => {
+  it('has BOM, the 10 columns in order with readable headers, CRLF and 2 dp numbers', () => {
     const csv = readingsCsv(rs, 'ft', ALL_COLUMNS);
     expect(csv.startsWith(BOM)).toBe(true);
     const lines = csv.slice(1).split('\r\n');
     expect(lines[0]).toBe(HEADER_FT);
-    expect(lines[1]).toBe('1,"North, ""old"" well",2026-01-01,08:00,top of casing,1050.50,20.10,1030.40,');
-    expect(lines[2]).toBe('2,"North, ""old"" well",2026-01-02,09:05,top of casing,1050.50,21.00,1029.50,"a,""b"""');
-    expect(lines[3]).toBe('3,"North, ""old"" well",2026-01-03,10:30,top of casing,1050.50,19.60,1030.90,\'=evil');
+    expect(lines[1]).toBe('1,"North, ""old"" well",2026-01-01,08:00,JD,top of casing,1050.50,20.10,1030.40,');
+    expect(lines[2]).toBe('2,"North, ""old"" well",2026-01-02,09:05,JD,top of casing,1050.50,21.00,1029.50,"a,""b"""');
+    expect(lines[3]).toBe('3,"North, ""old"" well",2026-01-03,10:30,JD,top of casing,1050.50,19.60,1030.90,\'=evil');
     const parsed = parseCsv(csv);
     expect(parsed).toHaveLength(4);
-    expect(parsed.every((r) => r.length === 9)).toBe(true);
+    expect(parsed.every((r) => r.length === 10)).toBe(true);
   });
   it('uses (m) headers and converts in meters', () => {
-    expect(readingsHeader('m', ALL_COLUMNS)).toEqual(['Reading ID', 'Borehole Name', 'Date', 'Time', 'Reference Point', 'Reference Elevation (m)', 'Depth to Top of Water (m)', 'Water Elevation (m)', 'Notes']);
+    expect(readingsHeader('m', ALL_COLUMNS)).toEqual(['Reading ID', 'Borehole Name', 'Date', 'Time', 'User Code', 'Reference Point', 'Reference Elevation (m)', 'Depth to Top of Water (m)', 'Water Elevation (m)', 'Notes']);
     const row = parseCsv(readingsCsv(rs.slice(0, 1), 'm', ALL_COLUMNS))[1];
-    expect(row[5]).toBe('320.19');
-    expect(row[6]).toBe('6.13');
+    expect(row[6]).toBe('320.19');
+    expect(row[7]).toBe('6.13');
   });
   it('includes only the columns switched on, keeping the fixed order', () => {
-    const cols = { ...ALL_COLUMNS, boreholeName: false, time: false, referencePoint: false, notes: false };
+    const cols = { ...ALL_COLUMNS, boreholeName: false, time: false, userCode: false, referencePoint: false, notes: false };
     const p = parseCsv(readingsCsv(rs, 'ft', cols));
     expect(p[0]).toEqual(['Reading ID', 'Date', 'Reference Elevation (ft)', 'Depth to Top of Water (ft)', 'Water Elevation (ft)']);
     expect(p[1]).toEqual(['1', '2026-01-01', '1050.50', '20.10', '1030.40']);
@@ -62,7 +62,14 @@ describe('readings CSV', () => {
   });
   it('keeps negative numbers numeric (not formula-guarded)', () => {
     const d = deriveReadings([{ ...rd(1, '2026-01-01T08:00', 10), refElevationFt: -5 }]);
-    expect(parseCsv(readingsCsv(d, 'ft', ALL_COLUMNS))[1][7]).toBe('-15.00');
+    expect(parseCsv(readingsCsv(d, 'ft', ALL_COLUMNS))[1][8]).toBe('-15.00');
+  });
+  it('puts User Code right after Time, formula-guarded, blank for old readings, with its own switch', () => {
+    const d = deriveReadings([rd(1, '2026-01-01T08:00', 1), { ...rd(2, '2026-01-01T09:00', 1), userCode: '' }, { ...rd(3, '2026-01-01T10:00', 1), userCode: '-X' }]);
+    const p = parseCsv(readingsCsv(d, 'ft', ALL_COLUMNS));
+    expect(p[0].slice(3, 5)).toEqual(['Time', 'User Code']);
+    expect(p.slice(1).map((r) => r[4])).toEqual(['JD', '', "'-X"]);
+    expect(parseCsv(readingsCsv(d, 'ft', { ...ALL_COLUMNS, userCode: false }))[0]).not.toContain('User Code');
   });
   it('builds safe filenames', () => {
     expect(csvFilename('all', '2026-10-26')).toBe('waterlevels_all_2026-10-26.csv');

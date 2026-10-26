@@ -52,7 +52,7 @@ export function migrateV1(rawB: V1Borehole[], rawR: V1Reading[], now = new Date(
     if (!ok(r)) { skipped.push(r); continue; }
     readings.push({
       id: readings.length + 1, borehole: nameOf.get(r.boreholeId)!, datetime: r.datetime.slice(0, 16),
-      referencePoint: r.referencePoint?.trim() || rpOf.get(r.boreholeId)!, refElevationFt: r.refElevationFt, depthFt: r.depthFt!,
+      referencePoint: r.referencePoint?.trim() || rpOf.get(r.boreholeId)!, refElevationFt: r.refElevationFt, depthFt: r.depthFt!, userCode: '',
       notes: r.notes?.trim() || undefined, createdAt: r.createdAt ?? now, updatedAt: r.updatedAt ?? now
     });
   }
