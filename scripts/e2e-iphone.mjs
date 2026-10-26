@@ -69,7 +69,32 @@ async function addReading(bh, depth, notes) {
   await page.click('[data-testid=rd-save]');
   await page.waitForSelector('[data-testid=history]');
 }
-await addReading('MW-1', '22.4', '=SUM(A1)');
+// First save with no User Code set: the sheet asks for it and the typed reading survives.
+await page.goto(url + '#/reading/new?bh=MW-1');
+ok((await page.textContent('[data-testid=rd-code]')).includes('not set'), 'form says the User Code is not set yet');
+await page.fill('[data-testid=rd-depth]', '22.4');
+await page.fill('[data-testid=rd-notes]', '=SUM(A1)');
+await page.click('[data-testid=rd-save]');
+await page.waitForSelector('[data-testid=uc-sheet]');
+ok(true, 'saving without a User Code opens the User Code sheet');
+await page.click('[data-testid=uc-prompt-cancel]');
+ok(!(await page.isVisible('[data-testid=uc-sheet]')) && await page.inputValue('[data-testid=rd-depth]') === '22.4' && await page.inputValue('[data-testid=rd-notes]') === '=SUM(A1)', 'cancel keeps the entered reading (depth and notes)');
+ok(!(await page.isVisible('[data-testid=history]')), 'cancel stays on the form and saves nothing');
+await page.click('[data-testid=rd-save]');
+await page.fill('[data-testid=uc-prompt-input]', 'a.b');
+await page.click('[data-testid=uc-prompt-save]');
+ok((await page.textContent('[data-testid=uc-prompt-error]')).includes('letters'), 'invalid User Code is rejected in the sheet');
+await page.fill('[data-testid=uc-prompt-input]', ' od-1 ');
+if (shots) await page.screenshot({ path: `${shots}/2-user-code-prompt.png` });
+await page.click('[data-testid=uc-prompt-save]');
+await page.waitForSelector('[data-testid=history]');
+ok((await page.textContent('[data-testid=history]')).includes('OD-1'), 'sheet saves the code (trimmed, uppercased) and completes the save with it');
+await page.goto(url + '#/readings');
+ok((await page.$$('[data-testid=readings-table] tbody tr')).length === 1, 'exactly one reading saved via the sheet');
+await page.goto(url + '#/settings');
+ok(await page.inputValue('[data-testid=uc-input]') === 'OD-1', 'code from the sheet is stored in Settings');
+await page.goto(url + '#/reading/new?bh=MW-1');
+ok((await page.textContent('[data-testid=rd-code]')).includes('OD-1'), 'form shows the code that will be stamped');
 await page.clock.setFixedTime(new Date('2026-10-26T13:42:00Z'));
 await addReading('MW-1', '20.15');
 await addReading('MW-2', '5', 'pump, "off"');
@@ -82,15 +107,26 @@ await page.goto(url + '#/reading/4');
 page.once('dialog', (d) => d.accept());
 await page.click('text=Delete reading');
 await page.waitForSelector('[data-testid=history]');
+await page.goto(url + '#/settings');
+await page.fill('[data-testid=uc-input]', 'x'.repeat(21));
+await page.click('[data-testid=uc-save]');
+ok((await page.textContent('[data-testid=uc-msg]')).includes('20'), 'User Code longer than 20 characters is rejected');
+await page.fill('[data-testid=uc-input]', 'jd_2');
+await page.click('[data-testid=uc-save]');
+ok((await page.textContent('[data-testid=uc-msg]')).includes('JD_2'), 'User Code can be changed in Settings (uppercased)');
+await page.reload();
+ok(await page.inputValue('[data-testid=uc-input]') === 'JD_2', 'User Code persists across reload');
+if (shots) await snap('3-settings-user-code.png');
 await addReading('MW-1', '19.75');
 await page.goto(url + '#/readings');
 ok(JSON.stringify(await ids()) === '[1,2,3,5]', 'deleted Reading ID 4 is not reused (new reading is #5)');
 
 await page.goto(url + '#/borehole/MW-1');
 const headers = await page.$$eval('[data-testid=history] th', (t) => t.map((x) => x.textContent));
-ok(headers.join('|') === 'Reading ID|Borehole Name|Date|Time|Reference Point|Reference Elevation (ft)|Depth to Top of Water (ft)|Water Elevation (ft)|Notes', `history columns in order (${headers.join('|')})`);
+ok(headers.join('|') === 'Reading ID|Borehole Name|Date|Time|User Code|Reference Point|Reference Elevation (ft)|Depth to Top of Water (ft)|Water Elevation (ft)|Notes', `history columns in order (${headers.join('|')})`);
 const hist = await page.textContent('[data-testid=history]');
 ok(hist.includes('2026-10-26') && hist.includes('09:15') && hist.includes('09:42'), 'date and time stamped from the phone clock (09:15, 09:42 local)');
+ok(hist.includes('OD-1') && hist.includes('JD_2'), 'history shows each reading\'s User Code');
 ok(hist.includes('1028.10') && hist.includes('1030.35') && hist.includes('1030.75'), 'water elevation = reference elevation − depth');
 ok(!/change|dry|reader/i.test(hist), 'no change/status/reader in history');
 ok(await page.isVisible('[data-testid=trend-chart] svg'), 'trend chart renders');
@@ -118,7 +154,6 @@ await page.fill('[data-testid=rd-depth]', '19.60');
 await page.fill('[data-testid=rd-notes]', 'after rain');
 await page.waitForSelector('[data-testid=rd-calc]');
 ok((await page.textContent('[data-testid=rd-calc]')).includes('1031.40'), 'live water elevation uses the current reference elevation');
-if (shots) await snap('2-add-reading.png');
 await page.click('[data-testid=rd-save]');
 await page.waitForSelector('[data-testid=history]');
 
@@ -131,35 +166,41 @@ ok(/^waterlevels_North-Pad-1_2026-10-26\.csv$/.test(name), `CSV filename ${name}
 let csv = readFileSync(await dl.path(), 'utf8');
 let lines = csv.replace(/^\uFEFF/, '').trim().split('\r\n');
 ok(csv.startsWith('\uFEFF'), 'CSV has a UTF-8 BOM');
-ok(lines[0] === 'Reading ID,Borehole Name,Date,Time,Reference Point,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft),Notes', 'CSV header: 9 readable columns in order');
+ok(lines[0] === 'Reading ID,Borehole Name,Date,Time,User Code,Reference Point,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft),Notes', 'CSV header: 10 readable columns in order');
 ok(lines.length === 5, `filtered CSV has 4 readings (${lines.length - 1})`);
-ok(lines[1] === "1,North Pad 1,2026-10-26,09:15,top of casing,1050.50,22.50,1028.00,'=SUM(A1)", `CSV row with formula guard (${lines[1]})`);
-ok(lines[4].startsWith('6,North Pad 1,2026-10-26,09:42,top of casing,1051.00,19.60,1031.40,after rain'), 'new reading snapshots the new reference elevation');
+ok(lines[1] === "1,North Pad 1,2026-10-26,09:15,OD-1,top of casing,1050.50,22.50,1028.00,'=SUM(A1)", `CSV row keeps its original User Code after edit + formula guard (${lines[1]})`);
+ok(lines[4].startsWith('6,North Pad 1,2026-10-26,09:42,JD_2,top of casing,1051.00,19.60,1031.40,after rain'), 'new reading snapshots the new reference elevation');
 
 // Settings: column toggles
 await page.goto(url + '#/settings');
 await page.click('[data-testid=col-time]');
 await page.click('[data-testid=col-notes]');
 await page.click('[data-testid=col-referencePoint]');
-if (shots) await snap('3-settings.png', '[data-testid=columns]');
+if (shots) await snap('5-report-columns.png', '[data-testid=columns]');
 await page.reload();
 ok(!(await page.isChecked('[data-testid=col-time]')) && await page.isChecked('[data-testid=col-date]'), 'column toggles persist across reload');
 await page.goto(url + '#/readings');
 [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid=export-csv]')]);
 lines = readFileSync(await dl.path(), 'utf8').replace(/^\uFEFF/, '').trim().split('\r\n');
-ok(lines[0] === 'Reading ID,Borehole Name,Date,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft)', `CSV only has columns switched on (${lines[0]})`);
-ok(lines.some((l) => l === '3,MW-2,2026-10-26,987.25,5.00,982.25'), 'row values follow the toggled columns');
+ok(lines[0] === 'Reading ID,Borehole Name,Date,User Code,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft)', `CSV only has columns switched on (${lines[0]})`);
+ok(lines.some((l) => l === '3,MW-2,2026-10-26,OD-1,987.25,5.00,982.25'), 'row values follow the toggled columns');
 const tableHeads = await page.$$eval('[data-testid=readings-table] th', (t) => t.length);
-ok(tableHeads === 6, `readings table shows the same 6 columns (${tableHeads})`);
+ok(tableHeads === 7, `readings table shows the same 7 columns (${tableHeads})`);
 await page.goto(url + '#/borehole/North%20Pad%201');
-ok((await page.$$('[data-testid=history] th')).length === 6, 'history table follows the toggles');
-if (shots) await snap('4-history.png', '[data-testid=history]');
+ok((await page.$$('[data-testid=history] th')).length === 7, 'history table follows the toggles');
+
 // At least one column must stay on
 await page.goto(url + '#/settings');
-for (const c of ['readingId', 'boreholeName', 'date', 'refElevation', 'depth']) await page.click(`[data-testid=col-${c}]`);
+for (const c of ['readingId', 'boreholeName', 'date', 'userCode', 'refElevation', 'depth']) await page.click(`[data-testid=col-${c}]`);
 ok(await page.isDisabled('[data-testid=col-waterElevation]'), 'last column on cannot be switched off');
 await page.click('[data-testid=col-all]');
-ok((await page.$$('[data-testid=columns] input:checked')).length === 9, '"Turn all on" restores all 9 columns');
+await page.click('[data-testid=col-userCode]');
+await page.goto(url + '#/readings');
+[dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid=export-csv]')]);
+ok(!readFileSync(await dl.path(), 'utf8').includes('User Code'), 'User Code column has its own switch (off → not exported)');
+await page.goto(url + '#/settings');
+await page.click('[data-testid=col-userCode]');
+ok((await page.$$('[data-testid=columns] input:checked')).length === 10, '"Turn all on" restores all 10 columns');
 
 // Share path: stub navigator.share to confirm a File is passed when canShare allows it
 await page.goto(url + '#/readings');
@@ -198,7 +239,11 @@ if (shots) {
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.goto(url + '#/borehole/North%20Pad%201');
   await page.waitForSelector('[data-testid=trend-chart]');
-  await snap('5-dark-mode-history.png');
+  await page.emulateMedia({ colorScheme: 'light' });
+  await page.$eval('table', (t) => { let e = t.parentElement; while (e && e.scrollWidth <= e.clientWidth) e = e.parentElement; if (e) e.scrollLeft = 260; });
+  await snap('4-history-user-code.png', '[data-testid=history]');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await snap('6-dark-mode-history.png');
 }
 
 // Migration: a device with v0.1.0 data (IndexedDB v1) upgrades in place
@@ -232,11 +277,15 @@ await p2.waitForSelector('[data-testid=borehole-list] li');
 const l2 = await p2.textContent('[data-testid=borehole-list]');
 ok(l2.includes('North pad') && l2.includes('MW-2') && l2.includes('1030.35'), 'v1 IndexedDB data migrates on upgrade (names, latest level)');
 await p2.goto(url + '#/readings');
+const migCodes = await p2.$$eval('[data-testid=readings-table] tbody tr', (trs) => trs.map((t) => t.querySelectorAll('td')[4].textContent));
+ok(migCodes.length === 3 && migCodes.every((c) => c === ''), 'migrated readings have a blank User Code');
 const mig = await p2.$$eval('[data-testid=readings-table] tbody tr', (trs) => trs.map((t) => [...t.querySelectorAll('td')].slice(0, 3).map((c) => c.textContent).join(' ')));
 ok(JSON.stringify(mig.reverse()) === JSON.stringify(['#1 North pad 2026-09-20', '#2 MW-2 2026-10-01', '#3 North pad 2026-10-15']), `migrated Reading IDs assigned by date/time (${mig.join(', ')})`);
 await p2.goto(url + '#/reading/new?bh=MW-2');
 await p2.fill('[data-testid=rd-depth]', '6');
 await p2.click('[data-testid=rd-save]');
+await p2.fill('[data-testid=uc-prompt-input]', 'NEW');
+await p2.click('[data-testid=uc-prompt-save]');
 await p2.waitForSelector('[data-testid=history]');
 ok((await p2.textContent('[data-testid=history]')).includes('#4'), 'next reading after migration gets #4');
 const arch = await p2.evaluate(() => new Promise((res) => { const rq = indexedDB.open('water-level-log'); rq.onsuccess = () => { const g = rq.result.transaction('meta').objectStore('meta').get('v1Archive'); g.onsuccess = () => { res(g.result?.value?.readings?.length); rq.result.close(); }; }; }));
