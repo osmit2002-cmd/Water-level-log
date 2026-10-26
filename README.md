@@ -77,3 +77,13 @@ Open the Pages URL in **Safari** → Share → **Add to Home Screen**. Open it o
 - The "edited elsewhere" check on save is not atomic: two saves in the same second on one phone may not warn.
 - A delete aimed at a borehole that was already merged into another is ignored on the Sheet (the merged borehole stays).
 - If you add your own columns to the Sheet, add them to the right of the app's columns.
+
+## 0.4.3 (review fixes)
+- Discarding a refused borehole also discards its readings still waiting to be sent (copies kept in backups), so nothing waits forever.
+- Readings that arrive from the sheet before their borehole are parked on the phone, never skipped. The sync position is held for at most 5 syncs (counted per sync), then moves on; parked readings are applied as soon as the borehole arrives. Settings shows a red warning while any are parked.
+- A kept borehole whose upload had failed is sent again instead of being skipped as "already kept".
+
+### Known limits (0.4.3 review)
+- Discarding a refused borehole *edit* also takes that borehole's waiting readings out of the send queue, even if the sheet would accept them. They stay on the phone and in backups, but are not sent unless edited again. Prefer fixing and retrying a refused borehole edit over discarding it.
+- Parked readings (waiting for their borehole) are not cleared when sync is pointed at a different sheet, so the red warning can stay. Restoring a backup or reinstalling clears it.
+- If a parked reading's borehole is then deleted on another phone, the reading is dropped from this phone's waiting list without a warning (it is still on the sheet).

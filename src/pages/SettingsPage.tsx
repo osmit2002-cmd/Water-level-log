@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { boreholesCsv, columnLabel, csvFilename, parseBoreholesCsv, readingsCsv } from '../lib/csv';
-import { discardFailed, findName, getDiscarded, getNextReadingId, outboxStats, replaceAll, retryFailed, upsertBoreholes, type OutboxItem } from '../lib/db';
+import { orphanCount, discardFailed, findName, getDiscarded, getNextReadingId, outboxStats, replaceAll, retryFailed, upsertBoreholes, type OutboxItem } from '../lib/db';
 import { makeBackup, validateBackup } from '../lib/backup';
 import { saveFile } from '../lib/share';
 import { todayLocal } from '../lib/math';
@@ -27,6 +27,8 @@ export default function SettingsPage() {
   const sync = useSync();
   const [surl, setSurl] = useState(sync.config.url);
   const [steam, setSteam] = useState(sync.config.team);
+  const [orphans, setOrphans] = useState(0);
+  useEffect(() => { void orphanCount().then(setOrphans); }, [sync.config.lastSyncedAt, sync.state]);
   const [syncMsg, setSyncMsg] = useState<{ kind: 'ok' | 'error'; text: string }>();
   const [checking, setChecking] = useState(false);
   async function turnOn() {
@@ -118,6 +120,7 @@ export default function SettingsPage() {
             <dt>Sheet</dt><dd className="small">{sync.config.url.replace(/^https:\/\//, '').slice(0, 60)}{sync.config.url.length > 68 ? '…' : ''}</dd>
           </dl>
           {sync.config.lastError && <p className="error" role="alert" data-testid="sync-error">{sync.config.lastError}</p>}
+          {orphans > 0 && <p className="error" role="alert" data-testid="sync-orphans">{orphans} reading(s) from the sheet are waiting for their borehole, which is missing on the sheet. They are kept on this phone and will appear when the borehole is back (check the Boreholes tab of the sheet).</p>}
           {sync.held.length > 0 && sync.pending > 0 && <p className="muted small" data-testid="sync-held">{sync.held.length} change(s) still waiting: {[...new Set(sync.held.map((h) => h.reason))].join('; ')}.</p>}
           {sync.failed.length > 0 && (
             <div className="error failed-list" role="alert" data-testid="sync-failed">

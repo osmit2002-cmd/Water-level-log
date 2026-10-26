@@ -77,3 +77,6 @@ Someone who knows the old code can no longer read or write once it has changed. 
 - **Restore a backup on a synced phone:** its records are re-sent and merged by the usual rules. Restoring **does not delete** anything from the Sheet.
 - **Clocks:** when two phones edit the same field, the edit with the later phone time wins. Keep phones on automatic date & time.
 - Free Google limits are far above what a field team needs. Each sync takes 1–3 seconds.
+
+## 0.4.3
+No setup change since 0.4.2: Code.gs is unchanged, only the app changed. A Sheet still running the 0.4.1 Code.gs should paste the new Code.gs and redeploy (Deploy > Manage deployments > Edit > New version), because 0.4.2 changed it. The URL and key stay the same.

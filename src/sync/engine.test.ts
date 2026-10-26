@@ -3,6 +3,7 @@ import { IDBFactory } from 'fake-indexeddb';
 import { describe, expect, it } from 'vitest';
 import * as db from '../lib/db';
 import { PUSH_CHUNK, syncOnce } from './engine';
+import { applyPull, MAX_CURSOR_HOLDS } from './apply';
 import { prepareEnable } from './enable';
 import { applyMine, staleBorehole, staleReading } from '../lib/conflict';
 import { makeBackup } from '../lib/backup';
@@ -338,6 +339,58 @@ describe('0.4.1 hardening (two phones, real Code.gs)', () => {
       expect((await on(p, db.allReadings)).map((r) => [r.borehole, r.depthFt])).toEqual([['MW-1A', 14]]);
     }
     expect(sheetRows(env, 'Boreholes').map((b) => b['Borehole Name'])).toEqual(['MW-1A']);
+  });
+
+  it('0.4.3 #1: discarding a refused borehole also discards its readings still pending (not failed), kept in backups', async () => {
+    const m = new MockAdapter();
+    await on(phone(), async () => {
+      await db.saveBorehole(bh('MW-1'));
+      const b = (await db.allBoreholes())[0];
+      m.reject = (k) => (k === `b:${b.uid}` ? 'bad' : undefined);
+      await syncOnce(m);
+      await db.addReading(rd('MW-1', 11)); // added after the refusal: pending, not linked yet
+      expect((await db.outboxAll()).filter((x) => x.kind === 'reading' && !x.failed)).toHaveLength(1);
+      await db.discardFailed(`b:${b.uid}`);
+      expect(await db.outboxCount()).toBe(0);
+      expect((await db.getDiscarded()).map((d) => d.item.kind).sort()).toEqual(['borehole', 'reading']);
+    });
+  });
+
+  it('0.4.3 #2: readings whose borehole never arrives are parked (not skipped), counted once per sync, applied when it arrives', async () => {
+    const m = new MockAdapter();
+    await on(phone(), async () => { await db.saveBorehole(bh('MW-1')); await db.addReading(rd('MW-1', 12)); await syncOnce(m); });
+    const [buid, b] = [...m.b.entries()][0];
+    m.b.delete(buid); // borehole row lost on the sheet (e.g. deleted by hand)
+    const P = phone();
+    await on(P, async () => {
+      for (let i = 0; i < MAX_CURSOR_HOLDS; i++) { await syncOnce(m); expect(await db.getCursor()).toBe(0); } // held per sync, not per pull
+      await syncOnce(m);
+      expect(await db.getCursor()).toBeGreaterThan(0); // cap hit: cursor moves on...
+      expect(await db.orphanCount()).toBe(1); // ...but the reading is kept and reported
+      expect(await db.allReadings()).toEqual([]);
+      m.b.set(buid, { ...b, rev: ++m.rev }); // borehole comes back; the reading itself is not re-sent
+      await syncOnce(m);
+      expect((await db.allReadings()).map((r) => r.depthFt)).toEqual([12]);
+      expect(await db.orphanCount()).toBe(0);
+    });
+  });
+
+  it('0.4.3 #3: a kept borehole whose outbox item failed is re-sent, not skipped as "already kept"', async () => {
+    const m = new MockAdapter();
+    await on(phone(), async () => {
+      await db.saveBorehole(bh('MW-1')); await db.addReading(rd('MW-1', 10)); await syncOnce(m);
+      const b = (await db.allBoreholes())[0];
+      const tomb = { uid: b.uid!, kind: 'borehole' as const, deletedAt: T(5) };
+      const pull = (): PullResult => ({ boreholes: [], readings: [], tombstones: [tomb], cursor: 999 } as unknown as PullResult);
+      await applyPull(pull());
+      m.reject = (k) => (k === `b:${b.uid}` ? 'temporarily bad' : undefined);
+      await syncOnce(m);
+      expect((await db.outboxAll()).find((x) => x.key === `b:${b.uid}`)?.failed).toBeTruthy();
+      m.reject = () => undefined;
+      const r = await applyPull(pull());
+      expect(r.queued).toBeGreaterThan(0);
+      expect((await db.outboxAll()).find((x) => x.key === `b:${b.uid}`)?.failed).toBeFalsy();
+    });
   });
 
   it('review: discarding a refused borehole discards its linked readings too (kept for the backup)', async () => {

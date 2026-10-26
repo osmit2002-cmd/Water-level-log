@@ -431,12 +431,20 @@ export async function retryFailed(key?: string) {
   queued();
 }
 /** Stop trying to sync one failed change. The record on this phone is untouched; the change is kept in meta and in backups. */
+/** Readings pulled from the sheet whose borehole has not arrived yet (parked, applied when it does). */
+export async function orphanCount(): Promise<number> {
+  const v = (await (await db()).get('meta', 'orphanReadings'))?.value as Record<string, unknown> | undefined;
+  return v ? Object.keys(v).length : 0;
+}
 export async function discardFailed(key: string) {
   const tx = await rw(['outbox', 'meta']);
   const it = await tx.objectStore('outbox').get(key);
   if (it?.failed) {
     // Discarding a borehole also discards the readings that failed because of it (they could never go in without it).
-    const linked = (await tx.objectStore('outbox').getAll()).filter((x) => x.failedBy === key);
+    // Also any reading of that borehole still waiting to be sent: without the borehole it would wait forever.
+    const buid = it.kind === 'borehole' ? (it.rec as { uid: string }).uid : undefined;
+    const linked = (await tx.objectStore('outbox').getAll()).filter((x) => x.key !== key && (x.failedBy === key ||
+      (buid !== undefined && x.kind === 'reading' && (x.rec as { boreholeUid?: string }).boreholeUid === buid)));
     const at = new Date().toISOString();
     const list = ((await tx.objectStore('meta').get(DISCARDED))?.value as DiscardedItem[] | undefined) ?? [];
     await tx.objectStore('meta').put({ key: DISCARDED, value: [...list, ...[it, ...linked].map((item) => ({ item, discardedAt: at }))] });

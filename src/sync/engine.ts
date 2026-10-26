@@ -17,6 +17,7 @@ const MAX_ROUNDS = 3;
  */
 export async function syncOnce(adapter: SyncAdapter): Promise<SyncRun> {
   const run: SyncRun = { pushed: 0, acked: 0, pulled: 0, changed: 0, rejected: [], held: [] };
+  const syncId = `${Date.now()}-${Math.random()}`;
   for (let round = 0; round < MAX_ROUNDS; round++) {
     await outboxLinkFailures();
     const items = (await outboxAll()).filter((x) => !x.failed);
@@ -37,7 +38,7 @@ export async function syncOnce(adapter: SyncAdapter): Promise<SyncRun> {
     }
     run.pushed += items.length;
     const p = await adapter.pull(await getCursor());
-    const { changed, queued } = await applyPull(p);
+    const { changed, queued } = await applyPull(p, syncId);
     run.pulled += p.boreholes.length + p.readings.length + p.tombstones.length;
     run.changed += changed;
     if (!queued) break;
