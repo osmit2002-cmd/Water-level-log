@@ -1,7 +1,6 @@
 import type { Reading, Unit } from './types';
 
 export const FT_PER_M = 1 / 0.3048;
-export const WARN_CHANGE_FT = 10;
 
 /** Round to 2 decimals without binary float artefacts (e.g. 1.005 -> 1.01, -0 -> 0). */
 export function round2(n: number): number {
@@ -16,63 +15,37 @@ export const fromUnit = (v: number, u: Unit) => (u === 'ft' ? v : v * FT_PER_M);
 export function fmtLen(ft: number | undefined, u: Unit): string {
   return ft == null ? '' : fmt2(toUnit(ft, u));
 }
-export function fmtChange(ft: number | undefined, u: Unit): string {
-  if (ft == null) return '';
-  const v = round2(toUnit(ft, u));
-  return (v > 0 ? '+' : '') + v.toFixed(2);
-}
-export function changeLabel(ft: number | undefined, u: Unit = 'ft'): 'rise' | 'fall' | 'no change' | '' {
-  if (ft == null) return '';
-  const v = round2(toUnit(ft, u));
-  return v > 0 ? 'rise' : v < 0 ? 'fall' : 'no change';
-}
 
 /** Parse a user-entered decimal (accepts "," as decimal separator). Returns NaN when invalid. */
 export function parseDecimal(s: string): number {
-  const t = s.trim().replace(',', '.');
+  const raw = s.trim();
+  // A comma is a decimal comma only on its own, never a thousands separator ("1,050" is rejected, not 1.05).
+  if (raw.includes(',') && (raw.includes('.') || /,\d{3}$/.test(raw))) return NaN;
+  const t = raw.replace(',', '.');
   if (!/^[-+]?(\d+\.?\d*|\.\d+)$/.test(t)) return NaN;
   return Number(t);
 }
 
-export function waterElevationFt(r: Pick<Reading, 'status' | 'depthFt' | 'refElevationFt'>): number | undefined {
-  if (r.status !== 'ok' || r.depthFt == null) return undefined;
+export function waterElevationFt(r: Pick<Reading, 'depthFt' | 'refElevationFt'>): number {
   return r.refElevationFt - r.depthFt;
 }
 
 export interface DerivedReading extends Reading {
-  waterElevFt?: number;
-  changeFt?: number; // vs previous valid reading of the same borehole
+  waterElevFt: number;
 }
 
 export function compareReadings(a: Reading, b: Reading): number {
-  return a.datetime < b.datetime ? -1 : a.datetime > b.datetime ? 1 : a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.uid < b.uid ? -1 : a.uid > b.uid ? 1 : 0;
+  return a.datetime < b.datetime ? -1 : a.datetime > b.datetime ? 1 : a.id - b.id;
 }
 
-/** Chronological readings per borehole with water elevation and change from the previous valid reading. */
+/** Readings in date/time order (Reading ID breaks ties) with computed water elevation. */
 export function deriveReadings(readings: Reading[]): DerivedReading[] {
-  const sorted = [...readings].sort(compareReadings);
-  const lastElev = new Map<string, number>();
-  return sorted.map((r) => {
-    const w = waterElevationFt(r);
-    const d: DerivedReading = { ...r, waterElevFt: w };
-    if (w != null) {
-      const prev = lastElev.get(r.boreholeId);
-      if (prev != null) d.changeFt = w - prev;
-      lastElev.set(r.boreholeId, w);
-    }
-    return d;
-  });
-}
-
-/** Change the candidate reading would have once saved (insert or replace by uid), using the same chronology as the lists. */
-export function previewChange(readings: Reading[], candidate: Reading): number | undefined {
-  const others = readings.filter((r) => r.uid !== candidate.uid);
-  return deriveReadings([...others, candidate]).find((r) => r.uid === candidate.uid)?.changeFt;
+  return [...readings].sort(compareReadings).map((r) => ({ ...r, waterElevFt: waterElevationFt(r) }));
 }
 
 export function latestPerBorehole(derived: DerivedReading[]): Map<string, DerivedReading> {
   const m = new Map<string, DerivedReading>();
-  for (const d of derived) if (d.waterElevFt != null) m.set(d.boreholeId, d);
+  for (const d of derived) m.set(d.borehole, d);
   return m;
 }
 
@@ -81,8 +54,8 @@ export function inDateRange(datetime: string, from?: string, to?: string): boole
   return (!from || day >= from) && (!to || day <= to);
 }
 
-export function nowLocal(): string {
-  const d = new Date();
+/** The phone's local clock as "YYYY-MM-DDTHH:mm". */
+export function nowLocal(d = new Date()): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
 }
