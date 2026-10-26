@@ -139,6 +139,17 @@ describe('Apps Script: 0.4.1 hardening', () => {
     expect(push([], [rd({ updatedAt: T1 })]).acked).toEqual(['r:r1']); // an old pre-delete copy is still ignored
     expect(sheet('Readings').objects()).toEqual([]);
   });
+  it('review: a reading delete cut off after its tombstone was written is finished by the retry', () => {
+    push([bh()], [rd()]);
+    env.ss.failAfter = 0; // tombstone row written... (Tombstones is written before Readings) ...then the Readings write times out
+    const r = push([], [], [{ uid: 'r1', kind: 'reading', deletedAt: T2 }]);
+    env.ss.failAfter = null;
+    if (r.ok === false) expect(sheet('Readings').objects().length).toBeLessThanOrEqual(1);
+    expect(push([], [], [{ uid: 'r1', kind: 'reading', deletedAt: T2 }]).acked).toEqual(['t:r1']);
+    expect(sheet('Readings').objects().filter((r) => r['Reading UID'])).toEqual([]);
+    expect(push([], [], [{ uid: 'b1', kind: 'borehole', deletedAt: T3 }]).acked).toEqual(['t:b1']);
+    expect(sheet('Boreholes').objects().filter((b) => b['Borehole UID'])).toEqual([]); // not kept alive by a leftover row
+  });
   it('review: boreholes are written before readings, so a cut-off write never leaves a reading without its borehole', () => {
     push([bh()]);
     env.ss.failAfter = 1; // the 2nd setValues of the next request throws

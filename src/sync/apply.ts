@@ -23,6 +23,8 @@ async function absorb(tx: Tx, from: Borehole, to: Borehole) {
 
 /** A time after `iso` (now, unless the clock is behind it). */
 const after = (iso: string) => { const n = new Date().toISOString(); return n > iso ? n : new Date(Date.parse(iso) + 1).toISOString(); };
+const CURSOR_HOLDS = 'syncCursorHolds';
+export const MAX_CURSOR_HOLDS = 5;
 const keptFlag = (n: number) => `Deleted on another phone, but ${n} reading(s) on this phone were kept`;
 
 /**
@@ -109,7 +111,7 @@ export async function applyPull(p: PullResult): Promise<{ changed: number; queue
         const local = await rs.index('byUid').get(t.uid);
         if (local && local.updatedAt > t.deletedAt) {
           // Edited here after it was deleted elsewhere: keep it and send it again (the sheet restores it, flagged).
-          await _queue(tx, 'reading', toRRec(local)); queued++;
+          if (!(await ob.get(`r:${local.uid}`))?.failed) { await _queue(tx, 'reading', toRRec(local)); queued++; }
           continue;
         }
         if (local) { await rs.delete(local.id); changed++; }
@@ -134,6 +136,8 @@ export async function applyPull(p: PullResult): Promise<{ changed: number; queue
         if (left.length || local.updatedAt > t.deletedAt) {
           // Never delete readings with a borehole delete. Keep it, flagged, and re-send it and its readings.
           const now = after(t.deletedAt);
+          const same = local.flag === keptFlag(left.length) && (await ob.getKey(`b:${local.uid}`)); // already kept: don't churn
+          if (same) continue;
           const kept = left.length ? { ...local, flag: keptFlag(left.length), updatedAt: now, fieldTimes: { ...local.fieldTimes, flag: now } } : local;
           if (kept !== local) await _putBorehole(tx, kept);
           await _queue(tx, 'borehole', toBRec(kept)); queued++;
@@ -147,7 +151,10 @@ export async function applyPull(p: PullResult): Promise<{ changed: number; queue
       await ob.delete(`b:${t.uid}`);
       await _tombstone(tx, t, false);
     }
-    if (!waitForBorehole) await meta.put({ key: CURSOR, value: p.cursor });
+    // Hold the cursor while a reading's borehole hasn't arrived, but not forever (e.g. a borehole row deleted by hand).
+    const holds = waitForBorehole ? (((await meta.get(CURSOR_HOLDS))?.value as number | undefined) ?? 0) + 1 : 0;
+    if (holds > 0 && holds < MAX_CURSOR_HOLDS) await meta.put({ key: CURSOR_HOLDS, value: holds });
+    else { await meta.put({ key: CURSOR, value: p.cursor }); await meta.put({ key: CURSOR_HOLDS, value: 0 }); }
     await tx.done;
   } catch (e) { try { tx.abort(); } catch { /* done */ } throw e; }
   return { changed, queued };

@@ -286,6 +286,74 @@ describe('0.4.1 hardening (two phones, real Code.gs)', () => {
     expect(PUSH_CHUNK).toBeLessThanOrEqual(250);
   });
 
+  it('#5 readings of a refused borehole are failed too, linked to it, and retrying the borehole retries them', async () => {
+    const m = new MockAdapter();
+    await on(phone(), async () => {
+      await db.saveBorehole(bh('MW-1'));
+      await db.addReading(rd('MW-1', 10)); await db.addReading(rd('MW-1', 11));
+      const b = (await db.allBoreholes())[0];
+      m.reject = (k) => (k === `b:${b.uid}` ? 'Reference Elevation is not a number' : undefined);
+      const run = await syncOnce(m);
+      expect(run.held).toEqual([]);
+      let st = await db.outboxStats();
+      expect(st.waiting).toBe(0);
+      expect(st.failed).toHaveLength(3);
+      const rf = st.failed.filter((f) => f.kind === 'reading');
+      expect(rf.every((f) => f.failedBy === `b:${b.uid}` && /MW-1 was refused \(Reference Elevation is not a number\)/.test(f.failed!))).toBe(true);
+      m.reject = () => undefined;
+      await db.retryFailed(`b:${b.uid}`);
+      await syncOnce(m);
+      st = await db.outboxStats();
+      expect(st).toEqual({ waiting: 0, failed: [] });
+      expect(m.r.size).toBe(2);
+    });
+  });
+
+  it('#6 saving a stale form for a reading whose borehole was deleted restores both, flagged, on every phone', async () => {
+    const { env, A, B, sa, sb } = await setup();
+    const old = await on(A, async () => (await db.allReadings())[0]);
+    await on(B, async () => { await db.deleteBorehole('MW-1'); await syncOnce(sb); });
+    await on(A, () => syncOnce(sa)); // A's copy is gone now; its form was still open
+    expect(await on(A, db.allBoreholes)).toEqual([]);
+    await on(A, async () => { await db.updateReading({ ...old, depthFt: 13, updatedAt: new Date().toISOString() }); await syncOnce(sa); });
+    await on(B, () => syncOnce(sb));
+    for (const p of [A, B]) {
+      const bs = await on(p, db.allBoreholes);
+      expect(bs.map((b) => [b.name, b.flag])).toEqual([['MW-1', expect.stringMatching(/brought back|kept|restored/i)]]);
+      expect((await on(p, db.allReadings)).map((r) => r.depthFt)).toEqual([13]);
+    }
+    expect(sheetRows(env, 'Readings').map((r) => r['Depth to Top of Water (ft)'])).toEqual([13]);
+    expect(await on(A, db.outboxCount)).toBe(0);
+  });
+
+  it('review: a stale reading form keeps a borehole rename made meanwhile (found by uid, not by the old name)', async () => {
+    const { env, A, B, sa, sb } = await setup();
+    const old = await on(A, async () => (await db.allReadings())[0]);
+    await on(B, async () => { const b = (await db.allBoreholes())[0]; await db.saveBorehole({ ...b, name: 'MW-1A', updatedAt: new Date().toISOString() }, 'MW-1'); await syncOnce(sb); });
+    await on(A, () => syncOnce(sa));
+    await on(A, async () => { await db.updateReading({ ...old, depthFt: 14, updatedAt: new Date().toISOString() }); await syncOnce(sa); });
+    await on(B, () => syncOnce(sb));
+    for (const p of [A, B]) {
+      expect((await on(p, db.allBoreholes)).map((b) => [b.name, b.flag ?? ''])).toEqual([['MW-1A', '']]);
+      expect((await on(p, db.allReadings)).map((r) => [r.borehole, r.depthFt])).toEqual([['MW-1A', 14]]);
+    }
+    expect(sheetRows(env, 'Boreholes').map((b) => b['Borehole Name'])).toEqual(['MW-1A']);
+  });
+
+  it('review: discarding a refused borehole discards its linked readings too (kept for the backup)', async () => {
+    const m = new MockAdapter();
+    await on(phone(), async () => {
+      await db.saveBorehole(bh('MW-1')); await db.addReading(rd('MW-1', 10));
+      const b = (await db.allBoreholes())[0];
+      m.reject = (k) => (k === `b:${b.uid}` ? 'bad' : undefined);
+      await syncOnce(m);
+      expect((await db.outboxStats()).failed).toHaveLength(2);
+      await db.discardFailed(`b:${b.uid}`);
+      expect(await db.outboxCount()).toBe(0);
+      expect((await db.getDiscarded()).map((d) => d.item.kind).sort()).toEqual(['borehole', 'reading']);
+    });
+  });
+
   it('#5 rejected changes become "failed" with the reason, are not resent, and can be retried or discarded (kept in backups)', async () => {
     const m = new MockAdapter();
     await on(phone(), async () => {

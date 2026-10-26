@@ -310,7 +310,7 @@ function relinkReadings_(db, fromUid, bh) {
     }
   }
 }
-function liveReadingsOf_(db, buid) { return db.R.rows.filter(function (r) { return r.boreholeUid === buid; }); }
+function liveReadingsOf_(db, buid) { return db.R.rows.filter(function (r) { return r.boreholeUid === buid && db.r[r.uid] === r && !dead_(db, r.uid); }); }
 
 function push_(db, req, env) {
   var acked = [], rejected = [], held = [], i;
@@ -333,7 +333,12 @@ function push_(db, req, env) {
   for (i = 0; i < tombs.length; i++) {
     var tb = tombs[i];
     acked.push('t:' + tb.uid);
-    if (dead_(db, tb.uid) || (db.t[tb.uid] && db.t[tb.uid].mergedInto)) continue;
+    if (dead_(db, tb.uid)) { // already deleted; finish a delete cut off by a time-out (tombstone written, row not yet blanked)
+      if (tb.kind === 'reading' && db.r[tb.uid]) clearRow_(db.R, db.r, tb.uid);
+      else if (tb.kind === 'borehole' && db.b[tb.uid] && !liveReadingsOf_(db, tb.uid).length) clearRow_(db.B, db.b, tb.uid);
+      continue;
+    }
+    if (db.t[tb.uid] && db.t[tb.uid].mergedInto) continue;
     if (tb.kind === 'reading') {
       var cr = db.r[tb.uid];
       if (cr && cr.updatedAt > tb.deletedAt) {

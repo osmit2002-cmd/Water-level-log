@@ -65,3 +65,15 @@ npm run icons        # regenerate PNG icons
 
 ## Install on iPhone
 Open the Pages URL in **Safari** → Share → **Add to Home Screen**. Open it once while online, and from then on it works offline. When an update is deployed, an "An update is ready" banner appears; tap **Update** to switch to it.
+
+## 0.4.2 (review fixes)
+- A reading form left open across a borehole rename or merge now saves under the current borehole (found by its id), instead of re-creating the old one.
+- A reading delete interrupted by a Sheet time-out is completed on the next sync; a leftover row no longer keeps its borehole alive.
+- Waiting for a missing borehole holds the sync position for at most 5 syncs; re-keeping an edited borehole no longer re-sends it every sync.
+- Readings refused because their borehole was refused are shown as failed and linked; they clear when the borehole is fixed, and discarding the borehole discards them too (kept in backups).
+
+### Known limits
+- Turning sync on for a phone with old local data can re-upload records that were deleted on another phone before (deletions are matched by id, not by name).
+- The "edited elsewhere" check on save is not atomic: two saves in the same second on one phone may not warn.
+- A delete aimed at a borehole that was already merged into another is ignored on the Sheet (the merged borehole stays).
+- If you add your own columns to the Sheet, add them to the right of the app's columns.

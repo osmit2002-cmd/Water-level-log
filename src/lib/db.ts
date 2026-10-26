@@ -16,6 +16,8 @@ export interface OutboxItem {
   /** Why the sheet refused it (0.4.1). Failed items are kept but not resent until the user taps Retry. */
   failed?: string;
   failedAt?: string;
+  /** Set when this item failed only because another item (its borehole, "b:uid") was refused. */
+  failedBy?: string;
 }
 /** A failed change the user chose to discard: kept here (and in backups) so it can still be recovered by hand. */
 export interface DiscardedItem { item: OutboxItem; discardedAt: string }
@@ -133,11 +135,34 @@ async function tombstone(tx: Tx, t: TombRec, push = true) {
   await tx.objectStore('outbox').delete(`${t.kind[0]}:${t.uid}`);
   if (push) await queue(tx, 'tombstone', t);
 }
-async function bhUid(tx: Tx, name: string) {
-  const b = await tx.objectStore('boreholes').get(name);
+export const RESTORED_FOR_EDIT = 'Deleted on another phone, but a reading in it was edited on this phone afterwards, so it was brought back. Check the reference values.';
+async function bhUid(tx: Tx, name: string, from?: Reading): Promise<{ uid: string; name: string }> {
+  if (from?.boreholeUid) {
+    // An existing reading: find its borehole by uid (following merges), so a rename or merge made meanwhile is kept.
+    let u = from.boreholeUid;
+    for (let i = 0; i < 20; i++) { const t = await tx.objectStore('tombstones').get(u); if (t?.mergedInto) u = t.mergedInto; else break; }
+    const cur = await tx.objectStore('boreholes').index('byUid').get(u);
+    if (cur?.uid) return { uid: cur.uid, name: cur.name };
+    const tomb = await tx.objectStore('tombstones').get(u);
+    if (tomb?.mergedInto || (!tomb && (await tx.objectStore('boreholes').get(name)))) from = undefined; // not a plain delete: no rebuild
+    else from = { ...from, boreholeUid: u };
+  }
+  let b = await tx.objectStore('boreholes').get(name);
+  if (!b && from) {
+    // A reading saved from a form left open while its borehole was deleted: bring the borehole back (flagged) from the
+    // reading's snapshot instead of failing. Same uid, edited now (after the delete), so the sheet restores it too.
+    const now = new Date().toISOString();
+    const uid = from.boreholeUid ?? uuid();
+    b = { name, uid, referencePoint: from.referencePoint, refElevationFt: from.refElevationFt, createdAt: now, updatedAt: now, flag: RESTORED_FOR_EDIT,
+      fieldTimes: { name: now, referencePoint: now, refElevationFt: now, flag: now } };
+    await tx.objectStore('boreholes').put(b);
+    if (await tx.objectStore('tombstones').getKey(uid)) { await tx.objectStore('tombstones').delete(uid); await tx.objectStore('outbox').delete(`t:${uid}`); }
+    await queue(tx, 'borehole', toBRec(b));
+    return { uid, name };
+  }
   if (!b) throw new Error(`Borehole ${name} no longer exists`);
-  if (!b.uid) { const f = fillBorehole(b); await tx.objectStore('boreholes').put(f); await queue(tx, 'borehole', toBRec(f)); return f.uid!; }
-  return b.uid;
+  if (!b.uid) { const f = fillBorehole(b); await tx.objectStore('boreholes').put(f); await queue(tx, 'borehole', toBRec(f)); return { uid: f.uid!, name: f.name }; }
+  return { uid: b.uid, name: b.name };
 }
 const rw = async (stores: Names[]) => (await db()).transaction(stores, 'readwrite') as Tx;
 const ALL: Names[] = ['boreholes', 'readings', 'meta', 'outbox', 'tombstones'];
@@ -165,7 +190,7 @@ export const allTombstones = async () => (await db()).getAll('tombstones');
 export async function addReading(r: Omit<Reading, 'id'>): Promise<number> {
   const tx = await rw(ALL);
   try {
-    const boreholeUid = await bhUid(tx, r.borehole);
+    const { uid: boreholeUid } = await bhUid(tx, r.borehole);
     const meta = tx.objectStore('meta');
     const rs = tx.objectStore('readings');
     let id = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
@@ -190,8 +215,8 @@ export async function addReading(r: Omit<Reading, 'id'>): Promise<number> {
 export async function updateReading(r: Reading) {
   const tx = await rw(ALL);
   try {
-    const boreholeUid = await bhUid(tx, r.borehole);
-    const full = { ...r, uid: r.uid ?? uuid(), boreholeUid };
+    const bh = await bhUid(tx, r.borehole, r.uid ? r : undefined);
+    const full = { ...r, uid: r.uid ?? uuid(), boreholeUid: bh.uid, borehole: bh.name };
     // Saving over a reading that was deleted meanwhile (the user confirmed it) brings it back: drop the local delete.
     // The edit is newer than the delete, so the sheet restores it too (and flags its borehole).
     if (await tx.objectStore('tombstones').getKey(full.uid)) { await tx.objectStore('tombstones').delete(full.uid); await tx.objectStore('outbox').delete(`t:${full.uid}`); }
@@ -371,12 +396,35 @@ export async function outboxFail(sent: OutboxItem[], rejected: ItemNote[]) {
   }
   await tx.done;
 }
-/** Retry one failed item (or all of them): clear the failure so the next sync sends it again. */
+/** Readings whose borehole was refused can't go in either: mark them failed too, linked to the borehole's failure. */
+export async function outboxLinkFailures() {
+  const tx = await rw(['outbox']);
+  const ob = tx.objectStore('outbox');
+  const all = await ob.getAll();
+  const badB = new Map(all.filter((x) => x.failed && x.kind === 'borehole').map((x) => [(x.rec as BoreholeRec).uid, x]));
+  const at = new Date().toISOString();
+  let n = 0;
+  for (const it of all) {
+    if (it.kind !== 'reading') continue;
+    if (it.failed && it.failedBy && !badB.has((it.rec as ReadingRec).boreholeUid)) {
+      // its borehole is no longer failing (fixed, edited or retried): send the reading again
+      const { failed: _f, failedAt: _a, failedBy: _b, ...rest } = it; await ob.put({ ...rest, ver: ver() }); n++; continue;
+    }
+    if (it.failed) continue;
+    const b = badB.get((it.rec as ReadingRec).boreholeUid);
+    if (!b) continue;
+    await ob.put({ ...it, failed: `Its borehole ${(b.rec as BoreholeRec).name} was refused (${b.failed}). Fix or retry the borehole.`, failedAt: at, failedBy: b.key });
+    n++;
+  }
+  await tx.done;
+  return n;
+}
+/** Retry one failed item (or all of them): clear the failure so the next sync sends it again. Retrying a borehole also retries readings that failed because of it. */
 export async function retryFailed(key?: string) {
   const tx = await rw(['outbox']);
   for (const it of await tx.objectStore('outbox').getAll()) {
-    if (!it.failed || (key && it.key !== key)) continue;
-    const { failed: _f, failedAt: _a, ...rest } = it;
+    if (!it.failed || (key && it.key !== key && it.failedBy !== key)) continue;
+    const { failed: _f, failedAt: _a, failedBy: _b, ...rest } = it;
     await tx.objectStore('outbox').put({ ...rest, ver: ver() });
   }
   await tx.done;
@@ -387,9 +435,12 @@ export async function discardFailed(key: string) {
   const tx = await rw(['outbox', 'meta']);
   const it = await tx.objectStore('outbox').get(key);
   if (it?.failed) {
+    // Discarding a borehole also discards the readings that failed because of it (they could never go in without it).
+    const linked = (await tx.objectStore('outbox').getAll()).filter((x) => x.failedBy === key);
+    const at = new Date().toISOString();
     const list = ((await tx.objectStore('meta').get(DISCARDED))?.value as DiscardedItem[] | undefined) ?? [];
-    await tx.objectStore('meta').put({ key: DISCARDED, value: [...list, { item: it, discardedAt: new Date().toISOString() }] });
-    await tx.objectStore('outbox').delete(key);
+    await tx.objectStore('meta').put({ key: DISCARDED, value: [...list, ...[it, ...linked].map((item) => ({ item, discardedAt: at }))] });
+    for (const x of [it, ...linked]) await tx.objectStore('outbox').delete(x.key);
   }
   await tx.done;
 }

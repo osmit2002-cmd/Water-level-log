@@ -1,4 +1,4 @@
-import { getCursor, outboxAck, outboxAll, outboxFail } from '../lib/db';
+import { getCursor, outboxAck, outboxAll, outboxFail, outboxLinkFailures } from '../lib/db';
 import type { BoreholeRec, ItemNote, ReadingRec, TombRec } from './types';
 import type { SyncAdapter } from './types';
 import { applyPull } from './apply';
@@ -18,6 +18,7 @@ const MAX_ROUNDS = 3;
 export async function syncOnce(adapter: SyncAdapter): Promise<SyncRun> {
   const run: SyncRun = { pushed: 0, acked: 0, pulled: 0, changed: 0, rejected: [], held: [] };
   for (let round = 0; round < MAX_ROUNDS; round++) {
+    await outboxLinkFailures();
     const items = (await outboxAll()).filter((x) => !x.failed);
     const rank = (x: (typeof items)[number]) => (x.kind === 'tombstone' ? ((x.rec as TombRec).kind === 'reading' ? 0 : 1) : x.kind === 'borehole' ? 2 : 3);
     items.sort((a, b) => rank(a) - rank(b));
@@ -29,7 +30,7 @@ export async function syncOnce(adapter: SyncAdapter): Promise<SyncRun> {
         readings: chunk.filter((x) => x.kind === 'reading').map((x) => x.rec as ReadingRec)
       });
       await outboxAck(chunk, res.acked);
-      if (res.rejected?.length) await outboxFail(chunk, res.rejected);
+      if (res.rejected?.length) { await outboxFail(chunk, res.rejected); await outboxLinkFailures(); }
       run.acked += res.acked.length;
       run.rejected.push(...(res.rejected ?? []));
       run.held.push(...(res.held ?? []));
@@ -42,7 +43,7 @@ export async function syncOnce(adapter: SyncAdapter): Promise<SyncRun> {
     if (!queued) break;
   }
   // Report only what is still waiting after the last round, once per item.
-  const left = new Set((await outboxAll()).map((x) => x.key));
+  const left = new Set((await outboxAll()).filter((x) => !x.failed).map((x) => x.key));
   run.held = [...new Map(run.held.filter((h) => left.has(h.key)).map((h) => [h.key, h])).values()];
   return run;
 }
