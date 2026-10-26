@@ -7,7 +7,15 @@ export interface Borehole {
   refElevationFt: number;
   createdAt: string;
   updatedAt: string;
+  /** 0.4.0 sync: stable internal ID (filled in by the database layer). */
+  uid?: string;
+  /** 0.4.0 sync: when each field was last edited (ISO, client clock). Newest wins per field. */
+  fieldTimes?: Partial<Record<BoreholeField, string>>;
+  /** Set when two phones created the same Borehole Name and the records were merged; '' = nothing to check. */
+  flag?: string;
 }
+export const BOREHOLE_FIELDS = ['name', 'referencePoint', 'refElevationFt', 'flag'] as const;
+export type BoreholeField = (typeof BOREHOLE_FIELDS)[number];
 
 export interface Reading {
   id: number; // Reading ID: sequential, assigned at save, never reused
@@ -20,6 +28,12 @@ export interface Reading {
   notes?: string;
   createdAt: string;
   updatedAt: string;
+  /** 0.4.0 sync: stable internal ID (filled in by the database layer). */
+  uid?: string;
+  /** 0.4.0 sync: the borehole's uid. */
+  boreholeUid?: string;
+  /** Per-phone running number used in the display ID USERCODE-0001 (legacy readings: their old Reading ID). */
+  seq?: number;
 }
 
 /** Report/CSV columns, in their fixed order. */

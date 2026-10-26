@@ -1,16 +1,34 @@
-import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { Borehole, Reading } from './types';
+import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb';
+import type { Borehole, BoreholeField, Reading } from './types';
+import { BOREHOLE_FIELDS } from './types';
 import type { BoreholePatch } from './csv';
 import { migrateV1, type V1Borehole, type V1Reading } from './migrate';
+import { displayId, uuid } from './ids';
+import type { BoreholeRec, ReadingRec, TombRec } from '../sync/types';
+
+/** One queued change. Keyed "b:uid" / "r:uid" / "t:uid" so repeated edits of one record coalesce. */
+export interface OutboxItem {
+  key: string;
+  kind: 'borehole' | 'reading' | 'tombstone';
+  rec: BoreholeRec | ReadingRec | TombRec;
+  /** Changes on every enqueue; an ack only removes the item if it was not changed again meanwhile. */
+  ver: string;
+}
 
 interface WLSchema extends DBSchema {
-  boreholes: { key: string; value: Borehole };
-  readings: { key: number; value: Reading; indexes: { byBorehole: string } };
+  boreholes: { key: string; value: Borehole; indexes: { byUid: string } };
+  readings: { key: number; value: Reading; indexes: { byBorehole: string; byUid: string } };
   meta: { key: string; value: { key: string; value: unknown } };
+  outbox: { key: string; value: OutboxItem };
+  tombstones: { key: string; value: TombRec };
 }
 export const DB_NAME = 'water-level-log';
-export const DB_VERSION = 2;
-const NEXT_ID = 'nextReadingId';
+export const DB_VERSION = 3;
+const NEXT_ID = 'nextReadingId'; // internal local key counter
+const NEXT_SEQ = 'nextSeq'; // this phone's running number for display IDs
+export const CURSOR = 'syncCursor';
+type Names = StoreNames<WLSchema>;
+type Tx = IDBPTransaction<WLSchema, Names[], 'readwrite'>;
 
 let dbp: Promise<IDBPDatabase<WLSchema>> | undefined;
 export function db() {
@@ -44,6 +62,19 @@ export function db() {
         }
         await meta.put({ key: NEXT_ID, value: next });
       }
+      if (oldVersion < 3) {
+        // 0.4.0: sync. Give every record a uid; existing readings keep their number as the display running number.
+        tx.objectStore('boreholes').createIndex('byUid', 'uid');
+        tx.objectStore('readings').createIndex('byUid', 'uid');
+        d.createObjectStore('outbox', { keyPath: 'key' });
+        d.createObjectStore('tombstones', { keyPath: 'uid' });
+        const bs = tx.objectStore('boreholes'), rs = tx.objectStore('readings'), meta = tx.objectStore('meta');
+        const uidOf = new Map<string, string>();
+        for (const b of await bs.getAll()) { const f = fillBorehole(b); uidOf.set(f.name, f.uid!); await bs.put(f); }
+        for (const r of await rs.getAll()) await rs.put({ ...r, userCode: r.userCode ?? '', uid: r.uid ?? uuid(), seq: r.seq ?? r.id, boreholeUid: uidOf.get(r.borehole) });
+        const next = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
+        await meta.put({ key: NEXT_SEQ, value: next });
+      }
      } catch (e) { try { tx.abort(); } catch { /* already aborted */ } throw e; }
     },
     blocking() { void dbp?.then((d) => d.close()); dbp = undefined; },
@@ -51,35 +82,109 @@ export function db() {
   }).catch((e) => { dbp = undefined; throw e; });
   return dbp;
 }
+/** Tests only: forget the cached connection. */
+export async function closeDb() { const d = await dbp?.catch(() => undefined); d?.close(); dbp = undefined; }
+
+/** Ensure sync fields; missing field times fall back to updatedAt. */
+export function fillBorehole(b: Borehole): Borehole {
+  const ft: Partial<Record<BoreholeField, string>> = { ...b.fieldTimes };
+  for (const f of BOREHOLE_FIELDS) ft[f] ??= b.updatedAt;
+  return { ...b, uid: b.uid ?? uuid(), fieldTimes: ft, flag: b.flag ?? '' };
+}
+
+// ---- wire conversion ----
+export function toBRec(b: Borehole): BoreholeRec {
+  const f = fillBorehole(b), t = f.fieldTimes!;
+  return { uid: f.uid!, name: f.name, referencePoint: f.referencePoint, refElevationFt: f.refElevationFt, flag: f.flag ?? '',
+    nameAt: t.name!, referencePointAt: t.referencePoint!, refElevationAt: t.refElevationFt!, flagAt: t.flag!, createdAt: f.createdAt, updatedAt: f.updatedAt };
+}
+export function fromBRec(r: BoreholeRec): Borehole {
+  return { uid: r.uid, name: r.name, referencePoint: r.referencePoint, refElevationFt: r.refElevationFt, flag: r.flag ?? '', createdAt: r.createdAt, updatedAt: r.updatedAt,
+    fieldTimes: { name: r.nameAt, referencePoint: r.referencePointAt, refElevationFt: r.refElevationAt, flag: r.flagAt } };
+}
+export function toRRec(r: Reading): ReadingRec {
+  return { uid: r.uid!, displayId: displayId(r), boreholeUid: r.boreholeUid!, boreholeName: r.borehole, datetime: r.datetime, userCode: r.userCode ?? '',
+    seq: r.seq ?? r.id, referencePoint: r.referencePoint, refElevationFt: r.refElevationFt, depthFt: r.depthFt, notes: r.notes ?? '', createdAt: r.createdAt, updatedAt: r.updatedAt };
+}
+
+// ---- outbox / tombstones (inside a caller's transaction) ----
+const ver = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+async function queue(tx: Tx, kind: OutboxItem['kind'], rec: OutboxItem['rec']) {
+  const key = `${kind[0]}:${rec.uid}`;
+  await tx.objectStore('outbox').put({ key, kind, rec, ver: ver() });
+  queued();
+}
+/** Tells the sync loop (if running) that something new is waiting. */
+export const QUEUED_EVENT = 'wll-queued';
+let queuedPending = false;
+function queued() {
+  if (queuedPending || typeof window === 'undefined') return;
+  queuedPending = true;
+  setTimeout(() => { queuedPending = false; window.dispatchEvent(new Event(QUEUED_EVENT)); }, 0);
+}
+async function tombstone(tx: Tx, t: TombRec, push = true) {
+  await tx.objectStore('tombstones').put(t);
+  await tx.objectStore('outbox').delete(`${t.kind[0]}:${t.uid}`);
+  if (push) await queue(tx, 'tombstone', t);
+}
+async function bhUid(tx: Tx, name: string) {
+  const b = await tx.objectStore('boreholes').get(name);
+  if (!b) throw new Error(`Borehole ${name} no longer exists`);
+  if (!b.uid) { const f = fillBorehole(b); await tx.objectStore('boreholes').put(f); await queue(tx, 'borehole', toBRec(f)); return f.uid!; }
+  return b.uid;
+}
+const rw = async (stores: Names[]) => (await db()).transaction(stores, 'readwrite') as Tx;
+const ALL: Names[] = ['boreholes', 'readings', 'meta', 'outbox', 'tombstones'];
 
 export const allBoreholes = async () => (await db()).getAll('boreholes');
 // Readings saved before 0.3.0 have no userCode: treat as blank.
 export const allReadings = async () => (await db()).getAll('readings').then((rs) => rs.map((r) => ({ ...r, userCode: r.userCode ?? '' })));
 export async function getNextReadingId(): Promise<number> {
-  return ((await (await db()).get('meta', NEXT_ID))?.value as number | undefined) ?? 1;
+  return ((await (await db()).get('meta', NEXT_SEQ))?.value as number | undefined) ?? ((await (await db()).get('meta', NEXT_ID))?.value as number | undefined) ?? 1;
 }
+export const outboxAll = async () => (await db()).getAll('outbox');
+export const outboxCount = async () => (await db()).count('outbox');
+export const allTombstones = async () => (await db()).getAll('tombstones');
 
-/** Insert a new reading with the next Reading ID (atomic; IDs are never reused, even after deletes). */
+/** Insert a new reading: next local key, next running number for the display ID, a uid, and an outbox entry. Returns the local key. */
 export async function addReading(r: Omit<Reading, 'id'>): Promise<number> {
-  const tx = (await db()).transaction(['readings', 'meta', 'boreholes'], 'readwrite');
-  if (!(await tx.objectStore('boreholes').getKey(r.borehole))) { tx.abort(); throw new Error(`Borehole ${r.borehole} no longer exists`); }
-  const meta = tx.objectStore('meta');
-  const rs = tx.objectStore('readings');
-  let id = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
-  while (await rs.getKey(id)) id++; // defensive: never overwrite
-  await rs.add({ ...r, id });
-  await meta.put({ key: NEXT_ID, value: id + 1 });
-  await tx.done;
-  return id;
+  const tx = await rw(ALL);
+  try {
+    const boreholeUid = await bhUid(tx, r.borehole);
+    const meta = tx.objectStore('meta');
+    const rs = tx.objectStore('readings');
+    let id = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
+    while (await rs.getKey(id)) id++; // defensive: never overwrite
+    const seq = r.seq ?? (((await meta.get(NEXT_SEQ))?.value as number | undefined) ?? id);
+    const full: Reading = { ...r, id, uid: r.uid ?? uuid(), boreholeUid, seq };
+    await rs.add(full);
+    await meta.put({ key: NEXT_ID, value: id + 1 });
+    if (r.seq === undefined) await meta.put({ key: NEXT_SEQ, value: seq + 1 });
+    await queue(tx, 'reading', toRRec(full));
+    await tx.done;
+    return id;
+  } catch (e) { try { tx.abort(); } catch { /* done */ } throw e; }
 }
 /** Update an existing reading (same ID). */
 export async function updateReading(r: Reading) {
-  const tx = (await db()).transaction(['readings', 'boreholes'], 'readwrite');
-  if (!(await tx.objectStore('boreholes').getKey(r.borehole))) { tx.abort(); throw new Error(`Borehole ${r.borehole} no longer exists`); }
-  await tx.objectStore('readings').put(r);
+  const tx = await rw(ALL);
+  try {
+    const boreholeUid = await bhUid(tx, r.borehole);
+    const full = { ...r, uid: r.uid ?? uuid(), boreholeUid };
+    await tx.objectStore('readings').put(full);
+    await queue(tx, 'reading', toRRec(full));
+    await tx.done;
+  } catch (e) { try { tx.abort(); } catch { /* done */ } throw e; }
+}
+export async function deleteReading(id: number) {
+  const tx = await rw(ALL);
+  const r = await tx.objectStore('readings').get(id);
+  if (r) {
+    await tx.objectStore('readings').delete(id);
+    if (r.uid) await tombstone(tx, { uid: r.uid, kind: 'reading', deletedAt: new Date().toISOString() });
+  }
   await tx.done;
 }
-export const deleteReading = async (id: number) => { await (await db()).delete('readings', id); };
 
 export const findName = (names: Iterable<string>, name: string) => {
   const k = name.trim().toLowerCase();
@@ -87,64 +192,149 @@ export const findName = (names: Iterable<string>, name: string) => {
   return undefined;
 };
 
+/** New field times: every field whose value changed gets `now`. */
+function stampFields(old: Borehole | undefined, b: Borehole, now: string): Borehole {
+  const o = old ? fillBorehole(old) : undefined;
+  // A form that does not carry the flag keeps the existing one (and its time).
+  const nb: Borehole = { ...b, uid: o?.uid ?? b.uid ?? uuid(), flag: b.flag ?? o?.flag ?? '' };
+  const ft: Partial<Record<BoreholeField, string>> = { ...o?.fieldTimes };
+  for (const f of BOREHOLE_FIELDS) if (!o || (o[f] ?? '') !== (nb[f] ?? '')) ft[f] = now;
+  return { ...nb, fieldTimes: ft };
+}
+
+/** Put a borehole, renaming (moving readings) if its name changed. Inside a transaction. */
+async function putBorehole(tx: Tx, b: Borehole, oldName?: string) {
+  const bs = tx.objectStore('boreholes');
+  if (oldName && oldName !== b.name) {
+    const rs = tx.objectStore('readings');
+    for (const r of await rs.index('byBorehole').getAll(oldName)) await rs.put({ ...r, borehole: b.name, boreholeUid: b.uid });
+    await bs.delete(oldName);
+  }
+  await bs.put(b);
+}
+
 /**
  * Create or update a borehole. `oldName` = current name when editing; a different `b.name` renames it
  * and moves its readings to the new name in the same transaction. Names are unique (case-insensitive).
  */
 export async function saveBorehole(b: Borehole, oldName?: string) {
-  const tx = (await db()).transaction(['boreholes', 'readings'], 'readwrite');
+  const tx = await rw(ALL);
   const bs = tx.objectStore('boreholes');
   const clash = findName(await bs.getAllKeys(), b.name);
   if (clash && clash !== oldName) { tx.abort(); throw new Error(`A borehole named ${clash} already exists`); }
-  if (oldName && oldName !== b.name) {
-    const rs = tx.objectStore('readings');
-    for (const r of await rs.index('byBorehole').getAll(oldName)) await rs.put({ ...r, borehole: b.name });
-    await bs.delete(oldName);
-  }
-  await bs.put(b);
+  const old = oldName ? await bs.get(oldName) : undefined;
+  const nb = stampFields(old, b, b.updatedAt);
+  await putBorehole(tx, nb, oldName);
+  await queue(tx, 'borehole', toBRec(nb));
   await tx.done;
 }
 
 export async function deleteBorehole(name: string) {
-  const tx = (await db()).transaction(['boreholes', 'readings'], 'readwrite');
+  const tx = await rw(ALL);
   const rs = tx.objectStore('readings');
-  for (const key of await rs.index('byBorehole').getAllKeys(name)) await rs.delete(key);
+  const now = new Date().toISOString();
+  for (const r of await rs.index('byBorehole').getAll(name)) {
+    await rs.delete(r.id);
+    if (r.uid) await tombstone(tx, { uid: r.uid, kind: 'reading', deletedAt: now }, false); // the server cascades from the borehole tombstone
+  }
+  const b = await tx.objectStore('boreholes').get(name);
   await tx.objectStore('boreholes').delete(name);
+  if (b?.uid) await tombstone(tx, { uid: b.uid, kind: 'borehole', deletedAt: now });
   await tx.done;
 }
 
 /** Upsert by name (case-insensitive match keeps the existing spelling). Absent columns keep existing values. */
 export async function upsertBoreholes(list: BoreholePatch[]) {
-  const tx = (await db()).transaction('boreholes', 'readwrite');
+  const tx = await rw(ALL);
+  const store = tx.objectStore('boreholes');
   const now = new Date().toISOString();
-  const names = await tx.store.getAllKeys();
+  const names = await store.getAllKeys();
   let added = 0, updated = 0;
   for (const p of list) {
     const existing = findName(names, p.name);
-    const old = existing ? await tx.store.get(existing) : undefined;
+    const old = existing ? await store.get(existing) : undefined;
     if (old) updated++; else { added++; names.push(p.name); }
-    await tx.store.put({
+    const b = stampFields(old, {
+      ...old,
       name: old?.name ?? p.name, referencePoint: p.referencePoint ?? old?.referencePoint ?? 'top of casing', // Keep the stored value when the CSV only differs by export rounding (2 dp in ft or m), so a round trip changes nothing.
       refElevationFt: old && Math.abs(old.refElevationFt - p.refElevationFt) < 0.017 ? old.refElevationFt : p.refElevationFt,
       createdAt: old?.createdAt ?? now, updatedAt: now
-    });
+    }, now);
+    if (old && JSON.stringify(toBRec(fillBorehole(old))) === JSON.stringify(toBRec({ ...b, updatedAt: old.updatedAt }))) continue;
+    await store.put(b);
+    await queue(tx, 'borehole', toBRec(b));
   }
   await tx.done;
   return { added, updated };
 }
 
-/** Replace all data (restore). The ID counter only moves forward, so IDs used on this device are never handed out again. */
+/**
+ * Replace all data (restore). The local counters only move forward. Every restored record is queued for sync
+ * (records deleted on this phone earlier stay deleted). The sync cursor is reset so the next sync pulls everything.
+ */
 export async function replaceAll(boreholes: Borehole[], readings: Reading[], nextReadingId: number) {
-  const tx = (await db()).transaction(['boreholes', 'readings', 'meta'], 'readwrite');
-  const cur = ((await tx.objectStore('meta').get(NEXT_ID))?.value as number | undefined) ?? 1;
+  const tx = await rw(ALL);
+  const meta = tx.objectStore('meta');
+  const cur = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
+  const curSeq = ((await meta.get(NEXT_SEQ))?.value as number | undefined) ?? 1;
+  const dead = new Set((await tx.objectStore('tombstones').getAllKeys()) as string[]);
   await tx.objectStore('boreholes').clear();
   await tx.objectStore('readings').clear();
-  for (const b of boreholes) await tx.objectStore('boreholes').put(b);
-  for (const r of readings) await tx.objectStore('readings').put(r);
+  await tx.objectStore('outbox').clear();
+  const uidOf = new Map<string, string>();
+  for (const b0 of boreholes) {
+    const b = fillBorehole(b0);
+    if (dead.has(b.uid!)) continue;
+    uidOf.set(b.name, b.uid!);
+    await tx.objectStore('boreholes').put(b);
+    await queue(tx, 'borehole', toBRec(b));
+  }
+  let maxSeq = 0;
+  for (const r0 of readings) {
+    const r = { ...r0, uid: r0.uid ?? uuid(), seq: r0.seq ?? r0.id, boreholeUid: uidOf.get(r0.borehole) };
+    if (dead.has(r.uid) || !r.boreholeUid) continue;
+    maxSeq = Math.max(maxSeq, r.seq);
+    await tx.objectStore('readings').put(r);
+    await queue(tx, 'reading', toRRec(r));
+  }
   const maxId = readings.reduce((m, r) => Math.max(m, r.id), 0);
-  await tx.objectStore('meta').put({ key: NEXT_ID, value: Math.max(cur, nextReadingId, maxId + 1) });
+  await meta.put({ key: NEXT_ID, value: Math.max(cur, nextReadingId, maxId + 1) });
+  await meta.put({ key: NEXT_SEQ, value: Math.max(curSeq, nextReadingId, maxSeq + 1) });
+  await meta.put({ key: CURSOR, value: 0 });
   await tx.done;
 }
+
+/** Queue every local record (used when sync is turned on, so data saved before joining is uploaded). */
+export async function queueEverything() {
+  const tx = await rw(ALL);
+  for (const b of await tx.objectStore('boreholes').getAll()) {
+    const f = fillBorehole(b);
+    if (!b.uid || !b.fieldTimes) await tx.objectStore('boreholes').put(f);
+    if (!(await tx.objectStore('outbox').getKey(`b:${f.uid}`))) await queue(tx, 'borehole', toBRec(f));
+  }
+  for (const r of await tx.objectStore('readings').getAll()) {
+    if (!r.uid || !r.boreholeUid) continue;
+    if (!(await tx.objectStore('outbox').getKey(`r:${r.uid}`))) await queue(tx, 'reading', toRRec(r));
+  }
+  for (const t of await tx.objectStore('tombstones').getAll()) if (!t.mergedInto && t.kind === 'borehole') await queue(tx, 'tombstone', t);
+  await tx.done;
+}
+
+/** Remove acknowledged items, unless they were changed again after being sent. */
+export async function outboxAck(sent: OutboxItem[], acked: string[]) {
+  const ok = new Set(acked);
+  const tx = await rw(['outbox']);
+  for (const s of sent) {
+    if (!ok.has(s.key)) continue;
+    const cur = await tx.objectStore('outbox').get(s.key);
+    if (cur && cur.ver === s.ver) await tx.objectStore('outbox').delete(s.key);
+  }
+  await tx.done;
+}
+export async function getCursor() { return ((await (await db()).get('meta', CURSOR))?.value as number | undefined) ?? 0; }
+
+export { rw as _rw, putBorehole as _putBorehole, tombstone as _tombstone, queue as _queue };
+export type { Tx };
 
 /** Ask the browser to keep our storage (iOS may still evict; JSON backups are the safety net). */
 export async function requestPersist(): Promise<boolean | undefined> {

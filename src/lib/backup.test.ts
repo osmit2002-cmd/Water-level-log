@@ -6,12 +6,12 @@ import { ALL_COLUMNS, DEFAULT_SETTINGS, normalizeSettings, normalizeUserCode, us
 const b = { name: 'MW-1', referencePoint: 'collar', refElevationFt: 10, createdAt: 'x', updatedAt: 'x' };
 const r = { id: 1, borehole: 'MW-1', datetime: '2026-01-01T08:00', depthFt: 2, refElevationFt: 10, referencePoint: 'collar', userCode: 'OD-1', createdAt: 'x', updatedAt: 'x' };
 
-describe('backup v3', () => {
+describe('backup v4', () => {
   it('round-trips with settings and the ID counter', () => {
     const bk = JSON.parse(JSON.stringify(makeBackup([b], [r], { ...DEFAULT_SETTINGS, unit: 'm', columns: { ...ALL_COLUMNS, notes: false } }, 7, 't')));
     const v = validateBackup(bk);
-    expect(v.fromVersion).toBe(3);
-    expect(v.backup.version).toBe(3);
+    expect(v.fromVersion).toBe(4);
+    expect(v.backup.version).toBe(4);
     expect(v.backup.readings).toEqual([r]);
     expect(v.backup.settings.unit).toBe('m');
     expect(v.backup.settings.columns.notes).toBe(false);
@@ -101,7 +101,7 @@ describe('User Code', () => {
     const v2 = { ...makeBackup([b], [r2 as typeof r], DEFAULT_SETTINGS, 2, 't'), version: 2 };
     const v = validateBackup(JSON.parse(JSON.stringify(v2)));
     expect(v.fromVersion).toBe(2);
-    expect(v.backup.version).toBe(3);
+    expect(v.backup.version).toBe(4);
     expect(v.backup.readings[0].userCode).toBe('');
   });
   it('normalizes v3 reading codes and rejects invalid ones', () => {
@@ -128,5 +128,19 @@ describe('migrateV1 robustness', () => {
     expect(m.readings).toHaveLength(1);
     expect(m.readings[0]).toMatchObject({ id: 1, borehole: '12', datetime: '2026-01-02T03:04', referencePoint: 'collar' });
     expect(m.skipped.map((r) => r.uid)).toEqual(['a']);
+  });
+});
+
+describe('backup v4 sync fields', () => {
+  it('keeps uids, running numbers, field times and flags; older backups still restore', () => {
+    const b = { name: 'MW-1', referencePoint: 'top of casing', refElevationFt: 100, createdAt: 'x', updatedAt: 'x', uid: 'b-uid-0001', flag: 'Check me', fieldTimes: { name: '2026-10-26T10:00:00Z' } };
+    const r = { id: 3, borehole: 'MW-1', datetime: '2026-10-26T09:00', referencePoint: 'top of casing', refElevationFt: 100, depthFt: 5, userCode: 'OD', createdAt: 'x', updatedAt: 'x', uid: 'r-uid-0001', seq: 7, boreholeUid: 'b-uid-0001' };
+    const v = validateBackup(JSON.parse(JSON.stringify(makeBackup([b], [r], DEFAULT_SETTINGS, 8, 't'))));
+    expect(v.backup.boreholes[0]).toMatchObject({ uid: 'b-uid-0001', flag: 'Check me', fieldTimes: { name: '2026-10-26T10:00:00Z' } });
+    expect(v.backup.readings[0]).toMatchObject({ uid: 'r-uid-0001', seq: 7 });
+    expect(() => validateBackup({ ...makeBackup([b], [r, { ...r, id: 4 }], DEFAULT_SETTINGS, 8, 't') })).toThrow(/duplicate uid/);
+    expect(() => validateBackup({ ...makeBackup([b], [{ ...r, seq: -1 }], DEFAULT_SETTINGS, 8, 't') })).toThrow(/sync field/);
+    const v3 = validateBackup({ ...makeBackup([b], [r], DEFAULT_SETTINGS, 8, 't'), version: 3 });
+    expect(v3.backup.readings[0].uid).toBeUndefined();
   });
 });

@@ -8,13 +8,14 @@ import ReadingsList from './pages/ReadingsList';
 import SettingsPage from './pages/SettingsPage';
 import InstallTip from './InstallTip';
 import UpdateBanner from './UpdateBanner';
+import { SyncBadge } from './sync/useSync';
 
 export default function App() {
   const { ready, loadError } = useStore();
   const loc = useLocation();
   return (
     <div className="app">
-      <header className="top"><h1>Water Level Log</h1></header>
+      <header className="top"><h1>Water Level Log</h1><SyncBadge /></header>
       <UpdateBanner />
       <InstallTip />
       <main>

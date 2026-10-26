@@ -1,3 +1,4 @@
+import { displayId } from './ids';
 import type { Borehole, ColumnKey, Columns, Unit } from './types';
 import { COLUMNS } from './types';
 import type { DerivedReading } from './math';
@@ -74,7 +75,7 @@ export function readingsHeader(u: Unit, cols: Columns): string[] {
 function readingCell(r: DerivedReading, c: ColumnKey, u: Unit): string {
   const L = (ft: number) => numCell(toUnit(ft, u));
   switch (c) {
-    case 'readingId': return String(r.id);
+    case 'readingId': return displayId(r);
     case 'boreholeName': return textCell(r.borehole);
     case 'date': return r.datetime.slice(0, 10);
     case 'time': return r.datetime.slice(11, 16);

@@ -1,3 +1,4 @@
+import { saveBorehole } from '../lib/db';
 import { Link, useParams } from 'react-router-dom';
 import { useStore } from '../store';
 import { fmtLen, todayLocal } from '../lib/math';
@@ -8,7 +9,7 @@ import ReadingsTable from '../ReadingsTable';
 
 export default function BoreholeDetail() {
   const { name = '' } = useParams();
-  const { bhMap, derived, settings } = useStore();
+  const { bhMap, derived, settings, reload } = useStore();
   const u = settings.unit;
   const b = bhMap.get(name);
   if (!b) return <p>Borehole not found. <Link to="/">Back</Link></p>;
@@ -20,6 +21,12 @@ export default function BoreholeDetail() {
         <h2>{b.name}</h2>
         <Link className="btn small" to={`/borehole/${encodeURIComponent(name)}/edit`} data-testid="bh-edit">Edit</Link>
       </div>
+      {b.flag && (
+        <div className="flag" role="status" data-testid="bh-flag">
+          <p>⚑ {b.flag}</p>
+          <button type="button" className="small" data-testid="bh-flag-clear" onClick={async () => { await saveBorehole({ ...b, flag: '', updatedAt: new Date().toISOString() }, b.name); await reload(); }}>Mark checked</button>
+        </div>
+      )}
       <dl className="facts">
         <dt>Reference point</dt><dd>{b.referencePoint}</dd>
         <dt>Reference elev.</dt><dd>{fmtLen(b.refElevationFt, u)} {u}</dd>

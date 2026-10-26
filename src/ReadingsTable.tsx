@@ -1,3 +1,4 @@
+import { displayId } from './lib/ids';
 import { Link } from 'react-router-dom';
 import type { Columns, Unit } from './lib/types';
 import { columnLabel, enabledColumns } from './lib/csv';
@@ -8,7 +9,7 @@ export default function ReadingsTable({ rows, unit: u, columns, testid }: { rows
   const keys = enabledColumns(columns);
   const cell = (r: DerivedReading, c: (typeof keys)[number]) => {
     switch (c) {
-      case 'readingId': return `#${r.id}`;
+      case 'readingId': return displayId(r);
       case 'boreholeName': return r.borehole;
       case 'date': return r.datetime.slice(0, 10);
       case 'time': return r.datetime.slice(11, 16);
@@ -29,7 +30,7 @@ export default function ReadingsTable({ rows, unit: u, columns, testid }: { rows
             <tr key={r.id} data-reading-id={r.id}>
               {keys.map((c, i) => (
                 <td key={c} className={c === 'notes' ? 'notes' : undefined}>
-                  {i === 0 ? <Link to={`/reading/${r.id}`} aria-label={`Edit reading #${r.id}`}>{cell(r, c) || '✎'}</Link> : cell(r, c)}
+                  {i === 0 ? <Link to={`/reading/${r.id}`} aria-label={`Edit reading ${displayId(r)}`}>{cell(r, c) || '✎'}</Link> : cell(r, c)}
                 </td>
               ))}
             </tr>

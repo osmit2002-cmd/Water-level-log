@@ -5,6 +5,7 @@ import { findName, getNextReadingId, replaceAll, upsertBoreholes } from '../lib/
 import { makeBackup, validateBackup } from '../lib/backup';
 import { saveFile } from '../lib/share';
 import { todayLocal } from '../lib/math';
+import { useSync } from '../sync/useSync';
 import { COLUMNS, USER_CODE_MAX, normalizeUserCode, userCodeError, type ColumnKey, type Settings } from '../lib/types';
 
 export default function SettingsPage() {
@@ -23,6 +24,24 @@ export default function SettingsPage() {
     set({ userCode: c }); setCode(c);
     setCodeMsg({ kind: 'ok', text: `Saved. New readings on this phone will record ${c}.` });
   }
+  const sync = useSync();
+  const [surl, setSurl] = useState(sync.config.url);
+  const [steam, setSteam] = useState(sync.config.team);
+  const [syncMsg, setSyncMsg] = useState<{ kind: 'ok' | 'error'; text: string }>();
+  const [checking, setChecking] = useState(false);
+  async function turnOn() {
+    setChecking(true); setSyncMsg(undefined);
+    try {
+      const e = await sync.enable(surl, steam);
+      setSyncMsg(e ? { kind: 'error', text: e } : { kind: 'ok', text: 'Sync is on. This phone now shares readings with the team sheet.' });
+    } finally { setChecking(false); }
+  }
+  function turnOff() {
+    if (!confirm('Turn sync off on this phone? Your data stays on this phone. New changes wait here and are sent if you turn sync back on.')) return;
+    sync.disable();
+    setSyncMsg({ kind: 'ok', text: 'Sync is off.' });
+  }
+  const fmtTime = (iso?: string) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : 'Never';
   const onCount = COLUMNS.filter((c) => settings.columns[c]).length;
 
   async function importCsv(file: File) {
@@ -39,7 +58,7 @@ export default function SettingsPage() {
     try { r = validateBackup(JSON.parse(await file.text())); } catch (e) { return setMsg({ kind: 'error', text: `Restore failed: ${(e as Error).message}` }); }
     const b = r.backup;
     const note = r.fromVersion === 1 ? `\n\nThis is an older (v1) backup. It will be converted: Reading IDs assigned by date/time${r.skipped ? `, ${r.skipped} Dry/No-reading entr${r.skipped === 1 ? 'y' : 'ies'} without a depth dropped` : ''}.` : '';
-    if (!confirm(`Replace ALL data on this device (${boreholes.length} boreholes, ${readings.length} readings) with the backup from ${b.exportedAt.slice(0, 10) || 'unknown date'} (${b.boreholes.length} boreholes, ${b.readings.length} readings)?${note}`)) return;
+    if (!confirm(`Replace ALL data on this device (${boreholes.length} boreholes, ${readings.length} readings) with the backup from ${b.exportedAt.slice(0, 10) || 'unknown date'} (${b.boreholes.length} boreholes, ${b.readings.length} readings)?${note}${sync.config.enabled ? '\n\nSync is on: the restored data will be sent to the team sheet. Nothing is deleted from the sheet, and data from other phones comes back on the next sync.' : ''}`)) return;
     await replaceAll(b.boreholes, b.readings, b.nextReadingId);
     // The User Code belongs to this phone, not the backup: keep the current one.
     setSettings({ ...b.settings, userCode: settings.userCode });
@@ -67,6 +86,31 @@ export default function SettingsPage() {
       </label>
       <p className="muted small">Recorded on every new reading, like the date and time. Up to {USER_CODE_MAX} letters, numbers, - or _. Changing it does not alter earlier readings.</p>
       {codeMsg && <p className={codeMsg.kind === 'error' ? 'error' : 'ok'} role="status" data-testid="uc-msg">{codeMsg.text}</p>}
+      <h2>Sync</h2>
+      <div className="syncbox" data-testid="sync-section">
+        {!sync.config.enabled ? (<>
+          <p className="muted small">Share boreholes and readings with your team through a Google Sheet. Ask whoever set up the sheet for the web app URL and the team code (see SETUP-GOOGLE-SHEET.md).</p>
+          <label>Web app URL
+            <input value={surl} onChange={(e) => setSurl(e.target.value)} inputMode="url" autoCapitalize="off" autoCorrect="off" spellCheck={false} placeholder="https://script.google.com/macros/s/…/exec" data-testid="sync-url" />
+          </label>
+          <label>Team code
+            <input value={steam} onChange={(e) => setSteam(e.target.value)} autoCapitalize="off" autoCorrect="off" spellCheck={false} autoComplete="off" data-testid="sync-team" />
+          </label>
+          <button type="button" className="wide primary" disabled={checking || !surl.trim() || !steam.trim()} onClick={() => void turnOn()} data-testid="sync-enable">{checking ? 'Checking…' : 'Turn on sync'}</button>
+          {sync.pending > 0 && <p className="muted small">{sync.pending} change(s) on this phone will be sent when sync is on.</p>}
+        </>) : (<>
+          <dl>
+            <dt>Status</dt><dd data-testid="sync-status">{sync.state === 'synced' ? 'All synced' : sync.state === 'syncing' ? 'Syncing…' : sync.state === 'offline' ? `Offline, ${sync.pending} waiting` : sync.state === 'error' ? `Error, ${sync.pending} waiting` : `${sync.pending} waiting`}</dd>
+            <dt>Last synced</dt><dd data-testid="sync-last">{fmtTime(sync.config.lastSyncedAt)}</dd>
+            <dt>Sheet</dt><dd className="small">{sync.config.url.replace(/^https:\/\//, '').slice(0, 60)}{sync.config.url.length > 68 ? '…' : ''}</dd>
+          </dl>
+          {sync.config.lastError && <p className="error" role="alert" data-testid="sync-error">{sync.config.lastError}</p>}
+          <button type="button" className="wide primary" disabled={sync.busy} onClick={() => void sync.syncNow()} data-testid="sync-now">{sync.busy ? 'Syncing…' : 'Sync now'}</button>
+          <button type="button" className="wide" onClick={turnOff} data-testid="sync-off">Turn off sync</button>
+        </>)}
+        {syncMsg && <p className={syncMsg.kind === 'error' ? 'error' : 'ok'} role="status" data-testid="sync-msg">{syncMsg.text}</p>}
+      </div>
+
       <fieldset className="seg" aria-label="Units">
         <legend>Units</legend>
         {(['ft', 'm'] as const).map((x) => <button key={x} type="button" className={u === x ? 'on' : ''} aria-pressed={u === x} onClick={() => set({ unit: x })} data-testid={`unit-${x}`}>{x === 'ft' ? 'Feet' : 'Meters'}</button>)}
@@ -114,7 +158,7 @@ export default function SettingsPage() {
           {msg.details && msg.details.length > 0 && <ul className="small">{msg.details.map((d) => <li key={d}>{d}</li>)}</ul>}
         </div>
       )}
-      <p className="muted small">Water Level Log {__APP_VERSION__}. All data stays on this device; nothing is uploaded.</p>
+      <p className="muted small">Water Level Log {__APP_VERSION__}. {sync.config.enabled ? 'Data is kept on this phone and shared with your team sheet.' : 'All data stays on this device; nothing is uploaded.'}</p>
     </section>
   );
 }

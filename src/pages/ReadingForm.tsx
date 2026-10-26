@@ -1,3 +1,4 @@
+import { displayId } from '../lib/ids';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useStore } from '../store';
@@ -66,7 +67,7 @@ export default function ReadingForm() {
     nav(`/borehole/${encodeURIComponent(old?.borehole ?? bh)}`, { replace: !!old });
   }
   async function remove() {
-    if (!confirm(`Delete reading #${old!.id}? This cannot be undone. Its Reading ID will not be reused.`)) return;
+    if (!confirm(`Delete reading ${displayId(old!)}? This cannot be undone. Its Reading ID will not be reused.`)) return;
     await deleteReading(old!.id);
     await reload();
     nav(`/borehole/${encodeURIComponent(old!.borehole)}`, { replace: true });
@@ -74,7 +75,7 @@ export default function ReadingForm() {
 
   return (
     <form onSubmit={save} className="form">
-      <h2>{old ? `Edit reading #${old.id}` : 'New reading'}</h2>
+      <h2>{old ? `Edit reading ${displayId(old)}` : 'New reading'}</h2>
       <label>Borehole Name
         <select value={bh} onChange={(e) => setBh(e.target.value)} disabled={!!old} data-testid="rd-borehole">
           {old && !bhMap.has(old.borehole) && <option value={old.borehole}>{old.borehole}</option>}
