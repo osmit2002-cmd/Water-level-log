@@ -3,10 +3,13 @@
 // SHOTS=dir also writes iPhone-size screenshots.
 import { webkit, devices } from 'playwright';
 import { readFileSync, mkdirSync } from 'node:fs';
+import { fakeEnv, loadCodeGs } from '../sync/apps-script/fake-sheet.mjs';
 
 const url = process.argv[2] ?? 'http://localhost:4173/';
 const origin = new URL(url).origin;
 const shots = process.env.SHOTS;
+// Mocked Apps Script web app: the real Code.gs runs in Node against an in-memory Sheet. Only this URL may leave the app origin.
+const SCRIPT = 'https://script.google.com/macros/s/AKfyc-TEST/exec';
 if (shots) mkdirSync(shots, { recursive: true });
 const ok = (cond, msg) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${msg}`); if (!cond) process.exitCode = 1; };
 const browser = await webkit.launch();
@@ -18,7 +21,7 @@ const errors = [];
 const external = [];
 const watch = (p) => {
   p.on('pageerror', (e) => errors.push(e.message));
-  p.on('request', (r) => { const u = r.url(); if (!u.startsWith(origin) && !u.startsWith('blob:') && !u.startsWith('data:')) external.push(u); });
+  p.on('request', (r) => { const u = r.url(); if (!u.startsWith(origin) && !u.startsWith('blob:') && !u.startsWith('data:') && !u.startsWith(SCRIPT)) external.push(u); });
 };
 watch(page);
 // Phone clock: 2026-10-26 09:15 in New York (13:15Z). Date/time must be stamped from this.
@@ -168,8 +171,8 @@ let lines = csv.replace(/^\uFEFF/, '').trim().split('\r\n');
 ok(csv.startsWith('\uFEFF'), 'CSV has a UTF-8 BOM');
 ok(lines[0] === 'Reading ID,Borehole Name,Date,Time,User Code,Reference Point,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft),Notes', 'CSV header: 10 readable columns in order');
 ok(lines.length === 5, `filtered CSV has 4 readings (${lines.length - 1})`);
-ok(lines[1] === "1,North Pad 1,2026-10-26,09:15,OD-1,top of casing,1050.50,22.50,1028.00,'=SUM(A1)", `CSV row keeps its original User Code after edit + formula guard (${lines[1]})`);
-ok(lines[4].startsWith('6,North Pad 1,2026-10-26,09:42,JD_2,top of casing,1051.00,19.60,1031.40,after rain'), 'new reading snapshots the new reference elevation');
+ok(lines[1] === "OD-1-0001,North Pad 1,2026-10-26,09:15,OD-1,top of casing,1050.50,22.50,1028.00,'=SUM(A1)", `CSV row keeps its original User Code after edit + formula guard (${lines[1]})`);
+ok(lines[4].startsWith('JD_2-0006,North Pad 1,2026-10-26,09:42,JD_2,top of casing,1051.00,19.60,1031.40,after rain'), 'new reading snapshots the new reference elevation');
 
 // Settings: column toggles
 await page.goto(url + '#/settings');
@@ -183,7 +186,7 @@ await page.goto(url + '#/readings');
 [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid=export-csv]')]);
 lines = readFileSync(await dl.path(), 'utf8').replace(/^\uFEFF/, '').trim().split('\r\n');
 ok(lines[0] === 'Reading ID,Borehole Name,Date,User Code,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft)', `CSV only has columns switched on (${lines[0]})`);
-ok(lines.some((l) => l === '3,MW-2,2026-10-26,OD-1,987.25,5.00,982.25'), 'row values follow the toggled columns');
+ok(lines.some((l) => l === 'OD-1-0003,MW-2,2026-10-26,OD-1,987.25,5.00,982.25'), 'row values follow the toggled columns');
 const tableHeads = await page.$$eval('[data-testid=readings-table] th', (t) => t.length);
 ok(tableHeads === 7, `readings table shows the same 7 columns (${tableHeads})`);
 await page.goto(url + '#/borehole/North%20Pad%201');
@@ -233,7 +236,7 @@ await page.reload();
 await page.waitForSelector('[data-testid=borehole-list] li');
 ok((await page.textContent('[data-testid=borehole-list]')).includes('1031.40'), 'offline reload shows stored data');
 await addReading('MW-2', '4.5');
-ok((await page.textContent('[data-testid=history]')).includes('#7'), 'can add a reading while offline (#7)');
+ok((await page.textContent('[data-testid=history]')).includes('JD_2-0007'), 'can add a reading while offline (JD_2-0007)');
 await ctx.setOffline(false);
 if (shots) {
   await page.emulateMedia({ colorScheme: 'dark' });
@@ -280,17 +283,179 @@ await p2.goto(url + '#/readings');
 const migCodes = await p2.$$eval('[data-testid=readings-table] tbody tr', (trs) => trs.map((t) => t.querySelectorAll('td')[4].textContent));
 ok(migCodes.length === 3 && migCodes.every((c) => c === ''), 'migrated readings have a blank User Code');
 const mig = await p2.$$eval('[data-testid=readings-table] tbody tr', (trs) => trs.map((t) => [...t.querySelectorAll('td')].slice(0, 3).map((c) => c.textContent).join(' ')));
-ok(JSON.stringify(mig.reverse()) === JSON.stringify(['#1 North pad 2026-09-20', '#2 MW-2 2026-10-01', '#3 North pad 2026-10-15']), `migrated Reading IDs assigned by date/time (${mig.join(', ')})`);
+ok(JSON.stringify(mig.reverse()) === JSON.stringify(['LEGACY-0001 North pad 2026-09-20', 'LEGACY-0002 MW-2 2026-10-01', 'LEGACY-0003 North pad 2026-10-15']), `migrated Reading IDs assigned by date/time, LEGACY- prefix (no User Code) (${mig.join(', ')})`);
 await p2.goto(url + '#/reading/new?bh=MW-2');
 await p2.fill('[data-testid=rd-depth]', '6');
 await p2.click('[data-testid=rd-save]');
 await p2.fill('[data-testid=uc-prompt-input]', 'NEW');
 await p2.click('[data-testid=uc-prompt-save]');
 await p2.waitForSelector('[data-testid=history]');
-ok((await p2.textContent('[data-testid=history]')).includes('#4'), 'next reading after migration gets #4');
+ok((await p2.textContent('[data-testid=history]')).includes('NEW-0004'), 'next reading after migration gets NEW-0004');
 const arch = await p2.evaluate(() => new Promise((res) => { const rq = indexedDB.open('water-level-log'); rq.onsuccess = () => { const g = rq.result.transaction('meta').objectStore('meta').get('v1Archive'); g.onsuccess = () => { res(g.result?.value?.readings?.length); rq.result.close(); }; }; }));
 ok(arch === 4, 'original v1 data (incl. the Dry entry) is kept in an archive record');
 await ctx2.close();
+
+// ---------- Sync through a (mocked) Google Sheet ----------
+const gs = loadCodeGs();
+const server = fakeEnv({ team: 'river-team-7' });
+let serverDown = false;
+const serve = async (route) => {
+  const req = route.request();
+  if (serverDown) return route.abort('internetdisconnected');
+  if (req.method() !== 'POST') return route.fulfill({ status: 405, body: '' });
+  const ct = req.headers()['content-type'] ?? '';
+  const out = ct.startsWith('text/plain') ? gs.handleRequest_(req.postData() ?? '', server) : { ok: false, error: 'expected text/plain' };
+  await route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(out) });
+};
+const sheetRows = (n) => server.ss.getSheetByName(n)?.objects() ?? [];
+const badge = (p) => p.getAttribute('[data-testid=sync-badge]', 'data-state').catch(() => null);
+const waitBadge = (p, st) => p.waitForSelector(`[data-testid=sync-badge][data-state=${st}]`, { timeout: 15000 });
+const rowIds = (p) => p.$$eval('[data-testid=readings-table] tbody tr', (trs) => trs.map((t) => t.querySelector('td').textContent).sort());
+async function join(p, team) {
+  await p.goto(url + '#/settings');
+  await p.fill('[data-testid=sync-url]', SCRIPT);
+  await p.fill('[data-testid=sync-team]', team);
+  await p.click('[data-testid=sync-enable]');
+  await p.waitForSelector('[data-testid=sync-msg]');
+  return p.textContent('[data-testid=sync-msg]');
+}
+// Playwright cannot intercept fetches that pass through a service worker in WebKit, so the sync part runs
+// without one (the offline/service-worker behaviour is checked above). Phone B blocks it from the start.
+// Playwright cannot intercept fetches in a context that has had a service worker in WebKit, so phone A's
+// data moves (via its own full backup) into a fresh context with service workers blocked.
+await page.goto(url + '#/settings');
+const [bk] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid=backup]')]);
+const bkPath = await bk.path();
+const lsA = await page.evaluate(() => JSON.stringify(localStorage));
+const ctxA = await browser.newContext({ ...ctxOpts, serviceWorkers: 'block' });
+await ctxA.addInitScript((s) => { if (!sessionStorage.getItem('wll-seeded')) { sessionStorage.setItem('wll-seeded', '1'); for (const [k, v] of Object.entries(JSON.parse(s))) localStorage.setItem(k, v); } }, lsA);
+await ctxA.route((u) => u.href.startsWith(SCRIPT), serve);
+const pa = await ctxA.newPage();
+watch(pa);
+await pa.goto(url + '#/settings');
+pa.once('dialog', (d) => d.accept());
+await pa.setInputFiles('[data-testid=restore]', bkPath);
+await pa.waitForTimeout(1500);
+ok(await pa.evaluate(() => !navigator.serviceWorker?.controller), 'sync tests: phone A data moved to a context without a service worker');
+await pa.goto(url + '#/');
+ok(await badge(pa) === null, 'no sync badge while sync is off');
+await pa.goto(url + '#/settings');
+if (shots) { await pa.evaluate(() => document.querySelector('[data-testid=sync-section]').scrollIntoView({ block: 'start' })); await pa.screenshot({ path: `${shots}/7-sync-settings-off.png` }); }
+const wrongMsg = await join(pa, 'wrong');
+ok(wrongMsg.includes('Wrong team code'), `wrong team code is refused and sync stays off (${wrongMsg})`);
+ok(await pa.isVisible('[data-testid=sync-enable]'), 'sync still off after the refused code');
+ok((await join(pa, 'river-team-7')).includes('Sync is on'), 'phone A joins with the team code');
+await waitBadge(pa, 'synced');
+ok((await pa.textContent('[data-testid=sync-badge]')) === 'All synced', 'badge: All synced');
+const aCount = (await pa.evaluate(() => new Promise((res) => { const rq = indexedDB.open('water-level-log'); rq.onsuccess = () => { const g = rq.result.transaction('readings').objectStore('readings').count(); g.onsuccess = () => { res(g.result); rq.result.close(); }; }; })));
+ok(sheetRows('Readings').length === aCount && sheetRows('Boreholes').length === 2, `existing data uploaded to the Sheet (${sheetRows('Readings').length} readings, ${sheetRows('Boreholes').length} boreholes)`);
+ok(sheetRows('Readings').some((r) => r['Reading ID'] === 'OD-1-0001' && r['Borehole Name'] === 'North Pad 1' && r.Notes === "'=SUM(A1)"), 'Sheet rows are readable (Reading ID, Borehole Name) and formula-guarded');
+ok((await pa.textContent('[data-testid=sync-last]')) !== 'Never', `last synced time shown (${await pa.textContent('[data-testid=sync-last]')})`);
+if (shots) { await pa.evaluate(() => document.querySelector('[data-testid=sync-section]').scrollIntoView({ block: 'start' })); await pa.screenshot({ path: `${shots}/8-sync-settings-on.png` }); }
+
+// Phone B: a fresh phone joins and receives everything.
+const ctx3 = await browser.newContext({ ...ctxOpts, serviceWorkers: 'block' });
+const pb = await ctx3.newPage();
+watch(pb);
+await ctx3.route((u) => u.href.startsWith(SCRIPT), serve);
+await pb.goto(url);
+await pb.waitForSelector('text=Boreholes (0)');
+ok((await join(pb, 'river-team-7')).includes('Sync is on'), 'phone B joins');
+await waitBadge(pb, 'synced');
+await pb.goto(url + '#/');
+await pb.waitForSelector('[data-testid=borehole-list] li');
+ok((await pb.textContent('[data-testid=borehole-list]')).includes('North Pad 1'), 'phone B received the boreholes');
+await pa.goto(url + '#/readings'); await pb.goto(url + '#/readings');
+ok(JSON.stringify(await rowIds(pa)) === JSON.stringify(await rowIds(pb)), `phone B received the same readings (${(await rowIds(pb)).length})`);
+
+// Offline on phone B: the reading is queued, badge shows waiting, then syncs when back online.
+await ctx3.setOffline(true);
+serverDown = true;
+await pb.goto(url + '#/reading/new?bh=MW-2');
+await pb.fill('[data-testid=rd-depth]', '3.25');
+await pb.click('[data-testid=rd-save]');
+await pb.fill('[data-testid=uc-prompt-input]', 'BK');
+await pb.click('[data-testid=uc-prompt-save]');
+await pb.waitForSelector('[data-testid=history]');
+await pb.waitForSelector('[data-testid=sync-badge]:has-text("1 waiting")', { timeout: 10000 });
+ok(['offline', 'waiting', 'error'].includes(await badge(pb)), `offline save is queued: badge "${await pb.textContent('[data-testid=sync-badge]')}"`);
+ok(!sheetRows('Readings').some((r) => r['Reading ID'] === 'BK-0001'), 'queued reading not on the Sheet yet');
+if (shots) { await pb.evaluate(() => window.scrollTo(0, 0)); await pb.screenshot({ path: `${shots}/9-badge-waiting-offline.png` }); }
+serverDown = false;
+await ctx3.setOffline(false);
+await pb.evaluate(() => window.dispatchEvent(new Event('online')));
+await waitBadge(pb, 'synced');
+ok(sheetRows('Readings').some((r) => r['Reading ID'] === 'BK-0001' && r['Borehole Name'] === 'MW-2' && r['User Code'] === 'BK'), 'back online: queued reading reaches the Sheet');
+if (shots) { await pb.evaluate(() => window.scrollTo(0, 0)); await pb.screenshot({ path: `${shots}/10-badge-all-synced.png` }); }
+
+// Phone A pulls it: both phones converge.
+await pa.goto(url + '#/settings');
+await pa.click('[data-testid=sync-now]');
+await waitBadge(pa, 'synced');
+await pa.goto(url + '#/readings'); await pb.goto(url + '#/readings');
+const ra = await rowIds(pa), rb = await rowIds(pb);
+ok(ra.includes('BK-0001') && JSON.stringify(ra) === JSON.stringify(rb), `two phones converge (${ra.length} readings each)`);
+
+// Edit on A is visible on B (newest edit wins).
+const bkLocal = await pa.$$eval('[data-testid=readings-table] tbody tr', (trs) => trs.find((t) => t.querySelector('td')?.textContent.trim() === 'BK-0001')?.dataset.readingId);
+ok(!!bkLocal, `BK-0001 row found on phone A (${bkLocal})`);
+await pa.goto(url + `#/reading/${bkLocal}`);
+await pa.fill('[data-testid=rd-depth]', '3.5');
+await pa.click('[data-testid=rd-save]');
+await pa.waitForSelector('[data-testid=history]');
+await pa.waitForSelector('[data-testid=sync-badge][data-state=synced]', { timeout: 15000 });
+ok(sheetRows('Readings').find((r) => r['Reading ID'] === 'BK-0001')['Depth to Top of Water (ft)'] === 3.5, 'edit on phone A is pushed after the save (debounced)');
+
+// Tombstone delete: A deletes BK-0001; B removes it on its next sync and it never comes back.
+await pa.goto(url + `#/reading/${bkLocal}`);
+pa.once('dialog', (d) => d.accept());
+await pa.click('text=Delete reading');
+await pa.waitForSelector('[data-testid=history]');
+await waitBadge(pa, 'synced');
+for (let i = 0; i < 30 && !sheetRows('Tombstones').length; i++) await pa.waitForTimeout(250);
+ok(sheetRows('Tombstones').some((t) => t.Kind === 'reading') && !sheetRows('Readings').some((r) => r['Reading ID'] === 'BK-0001'), 'delete goes to the Sheet as a tombstone and the row is removed');
+await pb.goto(url + '#/settings');
+await pb.click('[data-testid=sync-now]');
+await waitBadge(pb, 'synced');
+await pb.goto(url + '#/readings');
+ok(!(await rowIds(pb)).includes('BK-0001'), 'phone B: the deleted reading disappears');
+await pb.goto(url + '#/settings'); await pb.click('[data-testid=sync-now]'); await waitBadge(pb, 'synced');
+await pb.goto(url + '#/readings'); await pa.goto(url + '#/readings');
+ok(!(await rowIds(pb)).includes('BK-0001') && JSON.stringify(await rowIds(pa)) === JSON.stringify(await rowIds(pb)), 'deleted reading does not come back; phones still match');
+
+// Same borehole name created on both phones -> one borehole, flagged for checking.
+await pa.goto(url + '#/new-borehole');
+await pa.fill('[data-testid=bh-name]', 'MW-9'); await pa.fill('[data-testid=bh-elev]', '900'); await pa.click('[data-testid=bh-save]');
+await pb.goto(url + '#/new-borehole');
+await pb.fill('[data-testid=bh-name]', 'mw-9'); await pb.fill('[data-testid=bh-elev]', '901'); await pb.click('[data-testid=bh-save]');
+for (const p of [pa, pb, pa, pb]) { await p.goto(url + '#/settings'); await p.click('[data-testid=sync-now]'); await waitBadge(p, 'synced'); }
+await pb.goto(url + '#/');
+await pb.waitForSelector('[data-testid=bh-flag-dot]');
+ok((await pb.$$eval('[data-testid=borehole-list] strong', (s) => s.map((x) => x.textContent).filter((t) => /mw-9/i.test(t)))).length === 1, 'same-name boreholes merged into one');
+await pb.click('[data-testid=borehole-list] a.card:has([data-testid=bh-flag-dot])');
+await pb.waitForSelector('[data-testid=bh-flag]');
+ok((await pb.textContent('[data-testid=bh-flag]')).includes('two phones'), 'merged borehole is flagged for checking');
+if (shots) { await pb.evaluate(() => window.scrollTo(0, 0)); await pb.screenshot({ path: `${shots}/11-merged-borehole-flag.png` }); }
+await pb.click('[data-testid=bh-flag-clear]');
+await pb.waitForSelector('[data-testid=bh-flag]', { state: 'detached' });
+await waitBadge(pb, 'synced').catch(() => {});
+for (let i = 0; i < 40 && sheetRows('Boreholes').find((b) => /mw-9/i.test(b['Borehole Name']))['Check Flag']; i++) await pb.waitForTimeout(250);
+ok(!sheetRows('Boreholes').find((b) => /mw-9/i.test(b['Borehole Name']))['Check Flag'], '"Mark checked" clears the flag on the Sheet');
+
+// Error state: the team code is changed on the Sheet; this phone shows an error and keeps its changes.
+server._store.set('TEAM_CODE', 'new-code-2027');
+await pa.goto(url + '#/settings');
+await pa.click('[data-testid=sync-now]');
+await waitBadge(pa, 'error');
+ok((await pa.textContent('[data-testid=sync-error]')).includes('Wrong team code'), 'error state shows the reason');
+if (shots) await pa.screenshot({ path: `${shots}/12-badge-sync-error.png` });
+pa.once('dialog', (d) => d.accept());
+await pa.click('[data-testid=sync-off]');
+await pa.waitForSelector('[data-testid=sync-enable]');
+ok(await badge(pa) === null, 'turning sync off hides the badge');
+ok((await join(pa, 'new-code-2027')).includes('Sync is on'), 're-join with the new team code');
+await waitBadge(pa, 'synced');
+await ctx3.close();
 
 ok(external.length === 0, `no requests leave the app origin (${external.length})`);
 ok(errors.length === 0, `no page errors ${errors.join(' | ')}`);
