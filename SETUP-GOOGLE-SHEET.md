@@ -70,8 +70,10 @@ iPhone web apps can't sync in the background: open the app with signal to sync. 
 Someone who knows the old code can no longer read or write once it has changed. They do keep any data already on their own phone.
 
 ## Good to know
-- **Don't edit or sort the data rows by hand.** You can read them, filter them and make charts on another tab. Row order and the hidden-looking columns (UIDs, Rev, "Updated At") are used by the sync. To fix a value, edit it in the app.
-- **Deleting** in the app writes a row to **Tombstones**, so the item doesn't come back from another phone.
+- **Hand edits (0.4.1):** the script finds rows by their UID column and rewrites only rows that changed, appending new ones. So you can sort/filter (but not while phones are syncing, since a sort during the 1–3 s write can put values in the wrong rows; filter views are safer), add your own columns to the right, and add notes or formulas there; they survive syncs. **Don't edit the synced columns of a data row**: the phones don't see such edits, and the next app edit of that record overwrites them. Never edit or delete the UID, Rev or "Updated At" columns, and don't rename the header row. To fix a value, edit it in the app.
+- **Updating from 0.4.0:** paste the new `Code.gs` over the old one and *Deploy → Manage deployments → Edit → New version*. The Tombstones tab gains a `Restored At` column automatically.
+- **Deleting** in the app writes a row to **Tombstones**, so the item doesn't come back from another phone, unless a phone edited it *after* the delete: then it is restored, flagged ⚑ in the app, and the tombstone gets a `Restored At` time.
+- **Big catch-ups:** each request carries at most 250 changes (the app sends 100), so one sync stays far below the 6-minute script limit. If a write is cut off anyway, the phone retries and the result is the same (no duplicates).
 - **Restore a backup on a synced phone:** its records are re-sent and merged by the usual rules. Restoring **does not delete** anything from the Sheet.
 - **Clocks:** when two phones edit the same field, the edit with the later phone time wins. Keep phones on automatic date & time.
 - Free Google limits are far above what a field team needs. Each sync takes 1–3 seconds.

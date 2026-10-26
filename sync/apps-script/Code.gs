@@ -12,7 +12,11 @@
 var TEAM_CODE = 'CHANGE-ME';
 // =====================================================================================
 
-var MAX_ITEMS_ = 500;
+// One request may carry at most this many changes. The app sends 100 per request, which keeps every request
+// to a few seconds, far below the 6-minute Apps Script limit.
+var MAX_ITEMS_ = 250;
+// Scattered row writes are grouped into runs of consecutive rows; past this many runs one block is written instead.
+var MAX_RUNS_ = 40;
 var COLS_ = {
   Boreholes: [
     ['name', 'Borehole Name'], ['referencePoint', 'Reference Point'], ['refElevationFt', 'Reference Elevation (ft)'], ['flag', 'Check Flag'],
@@ -25,8 +29,10 @@ var COLS_ = {
     ['waterElevationFt', 'Water Elevation (ft)'], ['notes', 'Notes'], ['createdAt', 'Created At'], ['updatedAt', 'Updated At'],
     ['uid', 'Reading UID'], ['boreholeUid', 'Borehole UID'], ['seq', 'Seq'], ['rev', 'Rev']
   ],
-  Tombstones: [['kind', 'Kind'], ['uid', 'UID'], ['deletedAt', 'Deleted At'], ['mergedInto', 'Merged Into'], ['rev', 'Rev']]
+  Tombstones: [['kind', 'Kind'], ['uid', 'UID'], ['deletedAt', 'Deleted At'], ['mergedInto', 'Merged Into'], ['rev', 'Rev'], ['restoredAt', 'Restored At']]
 };
+// Columns added after 0.4.0: added to an existing sheet's header instead of failing.
+var OPTIONAL_ = { restoredAt: 1 };
 var NUMERIC_ = { refElevationFt: 1, depthFt: 1, waterElevationFt: 1, seq: 1, rev: 1 };
 
 // ---------------- web entry points ----------------
@@ -34,7 +40,6 @@ function doPost(e) {
   return json_(handleRequest_(e && e.postData ? e.postData.contents : '', liveEnv_()));
 }
 function doGet(e) {
-  var p = (e && e.parameter) || {};
   // Only a health check: data is never served over GET, so the team code never has to go in a URL.
   return json_({ ok: true, message: 'Water Level Log sync is running. Enter this URL and the team code in the app.' });
 }
@@ -56,6 +61,12 @@ function safeEq_(a, b) {
   for (var i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return d === 0;
 }
+/**
+ * A push is applied in two phases under the script lock: first every change is validated and applied to an
+ * in-memory copy (nothing written yet), then only the changed rows are written, and the revision counter is
+ * stored last. Every change is keyed by UUID, so if a request dies half way (timeout, quota) the phone's retry
+ * re-applies the same changes and ends in the same state.
+ */
 function handleRequest_(text, env) {
   var req;
   try { req = JSON.parse(text || '{}'); } catch (err) { return { ok: false, error: 'Bad request' }; }
@@ -65,12 +76,18 @@ function handleRequest_(text, env) {
   if (!safeEq_(String(req.team || ''), code)) return { ok: false, error: 'Wrong team code' };
   if (req.op === 'ping') return { ok: true, message: 'Connected to the team sheet' };
   if (req.op !== 'push' && req.op !== 'pull') return { ok: false, error: 'Unknown operation' };
+  if (req.op === 'push') {
+    var n = (req.tombstones || []).length + (req.boreholes || []).length + (req.readings || []).length;
+    if (!(n <= MAX_ITEMS_)) return { ok: false, error: 'Too many changes in one request (max ' + MAX_ITEMS_ + ')' };
+  }
   try { env.lock.waitLock(25000); } catch (err) { return { ok: false, error: 'The sheet is busy, try again' }; }
   try {
     var db = loadAll_(env.ss);
     db.rev = maxRev_(db, env);
-    var out = req.op === 'push' ? push_(db, req, env) : pull_(db, Number(req.since) || 0, env);
-    if (req.op === 'push') saveAll_(db, env);
+    if (req.op === 'pull') return pull_(db, Number(req.since) || 0);
+    var out = push_(db, req, env);
+    saveTable_(db.B); saveTable_(db.T); saveTable_(db.R); // boreholes first: a cut-off write never leaves readings without their borehole
+    env.props.setProperty('REV', String(db.rev)); // last: the batch is complete
     return out;
   } catch (err) {
     return { ok: false, error: String(err && err.message || err) };
@@ -92,11 +109,11 @@ function sheetFor_(ss, name) {
   }
   return sh;
 }
+function guard_(s) { return /^[=+\-@']/.test(s) ? "'" + s : s; } // never let a text value become a formula
 function toCell_(k, v) {
   if (v === undefined || v === null) return '';
-  if (NUMERIC_[k]) return Number(v);
-  var s = String(v);
-  return /^[=+\-@']/.test(s) ? "'" + s : s; // never let a value become a formula
+  if (NUMERIC_[k]) return v === '' ? '' : Number(v);
+  return guard_(String(v));
 }
 function fromCell_(k, v) {
   if (NUMERIC_[k]) return v === '' || v === null ? null : Number(v);
@@ -107,32 +124,62 @@ function loadTable_(ss, name) {
   var sh = sheetFor_(ss, name), cols = COLS_[name];
   var head = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0].map(String);
   var idx = cols.map(function (c) { return head.indexOf(c[1]); });
-  var missing = cols.filter(function (c, i) { return idx[i] < 0; });
+  var missing = cols.filter(function (c, i) { return idx[i] < 0 && !OPTIONAL_[c[0]]; });
   if (missing.length) throw new Error('Sheet "' + name + '" is missing column ' + missing[0][1] + '. Do not rename or delete the header row.');
-  var n = sh.getLastRow() - 1, rows = [];
-  var vals = n > 0 ? sh.getRange(2, 1, n, head.length).getValues() : [];
+  var last = sh.getLastRow(), rows = [];
+  var vals = last > 1 ? sh.getRange(2, 1, last - 1, head.length).getValues() : [];
   for (var r = 0; r < vals.length; r++) {
     var o = {};
-    for (var c = 0; c < cols.length; c++) o[cols[c][0]] = fromCell_(cols[c][0], vals[r][idx[c]]);
-    if (o.uid) rows.push(o);
+    for (var c = 0; c < cols.length; c++) o[cols[c][0]] = idx[c] < 0 ? '' : fromCell_(cols[c][0], vals[r][idx[c]]);
+    if (o.uid) { o._row = r + 2; rows.push(o); }
   }
-  return { sheet: sh, name: name, head: head, idx: idx, rows: rows, oldCount: n, dirty: false };
+  return { sheet: sh, name: name, head: head, idx: idx, rows: rows, last: last, dirty: {}, cleared: [] };
 }
+/** Write only the rows that changed (and append new ones); other rows, and columns that are not ours, are untouched. */
 function saveTable_(t) {
-  if (!t.dirty) return;
-  var cols = COLS_[t.name], w = t.head.length;
-  var out = t.rows.map(function (o) {
-    var row = []; for (var i = 0; i < w; i++) row.push('');
-    for (var c = 0; c < cols.length; c++) row[t.idx[c]] = toCell_(cols[c][0], o[cols[c][0]]);
-    return row;
-  });
-  var sh = t.sheet, need = out.length + 1;
+  var cols = COLS_[t.name], sh = t.sheet, uid, i, c;
+  var writes = {}, rowsToWrite = [], appended = [];
+  for (i = 0; i < t.cleared.length; i++) writes[t.cleared[i]] = null;
+  for (uid in t.dirty) {
+    var o = t.dirty[uid];
+    if (!o._row) { o._row = ++t.last; appended.push(o._row); }
+    writes[o._row] = o;
+  }
+  for (var k in writes) rowsToWrite.push(Number(k));
+  if (!rowsToWrite.length) return;
+  // Columns added in a newer version go at the end of the header.
+  var add = [];
+  for (c = 0; c < cols.length; c++) if (t.idx[c] < 0) { t.idx[c] = t.head.length + add.length; add.push(cols[c][1]); }
+  if (add.length) { sh.getRange(1, t.head.length + 1, 1, add.length).setValues([add]); t.head = t.head.concat(add); }
+  rowsToWrite.sort(function (a, b) { return a - b; });
+  var need = rowsToWrite[rowsToWrite.length - 1];
   if (sh.getMaxRows() < need) sh.insertRowsAfter(sh.getMaxRows(), need - sh.getMaxRows() + 100);
-  if (t.oldCount > 0) sh.getRange(2, 1, t.oldCount, w).clearContent();
-  if (out.length) {
-    // Keep text columns as plain text on every write (new rows past the first format do not inherit it).
-    for (var c = 0; c < cols.length; c++) if (!NUMERIC_[cols[c][0]]) sh.getRange(2, t.idx[c] + 1, out.length, 1).setNumberFormat('@');
-    sh.getRange(2, 1, out.length, w).setValues(out);
+  var c0 = Math.min.apply(null, t.idx), c1 = Math.max.apply(null, t.idx), w = c1 - c0 + 1;
+  if (appended.length) {
+    // New rows do not always inherit the header's text format: set it on the appended block.
+    for (c = 0; c < cols.length; c++) if (!NUMERIC_[cols[c][0]]) sh.getRange(appended[0], t.idx[c] + 1, appended.length, 1).setNumberFormat('@');
+  }
+  var runs = [], a = rowsToWrite[0], b = a;
+  for (i = 1; i < rowsToWrite.length; i++) {
+    if (rowsToWrite[i] === b + 1) b = rowsToWrite[i]; else { runs.push([a, b]); a = b = rowsToWrite[i]; }
+  }
+  runs.push([a, b]);
+  if (runs.length > MAX_RUNS_) runs = [[rowsToWrite[0], rowsToWrite[rowsToWrite.length - 1]]];
+  for (var q = 0; q < runs.length; q++) {
+    var r0 = runs[q][0], n = runs[q][1] - r0 + 1;
+    var rg = sh.getRange(r0, c0 + 1, n, w);
+    var vals = rg.getValues(), fx = rg.getFormulas(), out = [];
+    for (i = 0; i < n; i++) {
+      var row = [];
+      // Cells we do not own keep their formula, or their value (text guarded so it stays text).
+      for (c = 0; c < w; c++) row.push(fx[i][c] ? fx[i][c] : typeof vals[i][c] === 'string' ? guard_(vals[i][c]) : vals[i][c]);
+      if (Object.prototype.hasOwnProperty.call(writes, r0 + i)) {
+        var obj = writes[r0 + i];
+        for (c = 0; c < cols.length; c++) row[t.idx[c] - c0] = obj ? toCell_(cols[c][0], obj[cols[c][0]]) : '';
+      }
+      out.push(row);
+    }
+    rg.setValues(out);
   }
 }
 function loadAll_(ss) {
@@ -146,10 +193,9 @@ function maxRev_(db, env) {
   for (var i = 0; i < all.length; i++) if (Number(all[i].rev) > m) m = Number(all[i].rev);
   return m;
 }
-function saveAll_(db, env) { saveTable_(db.B); saveTable_(db.R); saveTable_(db.T); env.props.setProperty('REV', String(db.rev || rev_(env))); }
 function byUid_(rows) { var m = {}; for (var i = 0; i < rows.length; i++) m[rows[i].uid] = rows[i]; return m; }
 function rev_(env) { return Number(env.props.getProperty('REV') || 0); }
-function bump_(db, env) { db.rev = (db.rev || rev_(env)) + 1; return db.rev; }
+function bump_(db) { db.rev = (db.rev || 0) + 1; return db.rev; }
 
 // ---------------- merge rules (same as the app's src/sync/merge.ts) ----------------
 var BFIELDS_ = [['name', 'nameAt'], ['referencePoint', 'referencePointAt'], ['refElevationFt', 'refElevationAt'], ['flag', 'flagAt']];
@@ -165,21 +211,46 @@ function mergeBorehole_(a, b) {
   return out;
 }
 function sameName_(a, b) { return String(a).trim().toLowerCase() === String(b).trim().toLowerCase(); }
+/** Follow "merged into" links (merges are permanent redirects, never undone). */
 function canon_(db, uid) {
   for (var i = 0; i < 20 && db.t[uid] && db.t[uid].mergedInto; i++) uid = db.t[uid].mergedInto;
   return uid;
 }
+/** An active delete (not a merge, not undone). */
+function dead_(db, uid) { var t = db.t[uid]; return t && !t.mergedInto && !t.restoredAt ? t : null; }
 function bKey_(b) { return [b.name, b.referencePoint, b.refElevationFt, b.flag, b.nameAt, b.referencePointAt, b.refElevationAt, b.flagAt].join('\u0001'); }
+/** A time just after `iso` (or now, if later): used so a restore always sorts after the delete it undoes. */
+function after_(iso, env) {
+  var now = env.now(), t = Date.parse(iso || '');
+  if (!isFinite(t)) return now;
+  var a = new Date(t + 1).toISOString();
+  return a > now ? a : now;
+}
 
+var DT_ = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+function whyB_(x) {
+  if (!x || typeof x !== 'object') return 'Not a borehole record';
+  if (typeof x.uid !== 'string' || !x.uid) return 'Borehole has no ID';
+  if (typeof x.name !== 'string' || !x.name.trim()) return 'Borehole Name is empty';
+  if (typeof x.refElevationFt !== 'number' || !isFinite(x.refElevationFt)) return 'Reference Elevation is not a number';
+  return '';
+}
 function cleanB_(x) {
-  if (!x || typeof x.uid !== 'string' || !x.uid || typeof x.name !== 'string' || !x.name.trim() || typeof x.refElevationFt !== 'number' || !isFinite(x.refElevationFt)) return null;
   var s = function (v) { return v === undefined || v === null ? '' : String(v); };
   return { uid: x.uid, name: x.name.trim(), referencePoint: s(x.referencePoint), refElevationFt: x.refElevationFt, flag: s(x.flag),
     nameAt: s(x.nameAt), referencePointAt: s(x.referencePointAt), refElevationAt: s(x.refElevationAt), flagAt: s(x.flagAt), createdAt: s(x.createdAt), updatedAt: s(x.updatedAt) };
 }
+function whyR_(x) {
+  if (!x || typeof x !== 'object') return 'Not a reading record';
+  if (typeof x.uid !== 'string' || !x.uid) return 'Reading has no ID';
+  if (typeof x.boreholeUid !== 'string' || !x.boreholeUid) return 'Reading has no borehole';
+  if (typeof x.datetime !== 'string' || !DT_.test(x.datetime)) return 'Reading date/time is not valid';
+  if (typeof x.depthFt !== 'number' || !isFinite(x.depthFt)) return 'Depth is not a number';
+  if (x.depthFt < 0) return 'Depth is negative';
+  if (typeof x.refElevationFt !== 'number' || !isFinite(x.refElevationFt)) return 'Reference Elevation is not a number';
+  return '';
+}
 function cleanR_(x) {
-  if (!x || typeof x.uid !== 'string' || !x.uid || typeof x.boreholeUid !== 'string' || typeof x.datetime !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(x.datetime)) return null;
-  if (typeof x.depthFt !== 'number' || !isFinite(x.depthFt) || typeof x.refElevationFt !== 'number' || !isFinite(x.refElevationFt)) return null;
   var s = function (v) { return v === undefined || v === null ? '' : String(v); };
   return { uid: x.uid, displayId: s(x.displayId), boreholeUid: x.boreholeUid, datetime: x.datetime.slice(0, 16), userCode: s(x.userCode), seq: Number(x.seq) || 0,
     referencePoint: s(x.referencePoint), refElevationFt: x.refElevationFt, depthFt: x.depthFt, notes: s(x.notes), createdAt: s(x.createdAt), updatedAt: s(x.updatedAt) };
@@ -190,66 +261,113 @@ function readingRow_(r, bh) {
     notes: r.notes, createdAt: r.createdAt, updatedAt: r.updatedAt, uid: r.uid, boreholeUid: bh.uid, seq: r.seq };
 }
 
+// ---------------- in-memory changes (written by saveTable_) ----------------
+function put_(tbl, map, o, db) {
+  o.rev = bump_(db);
+  var cur = map[o.uid];
+  if (cur) { o._row = cur._row; tbl.rows[tbl.rows.indexOf(cur)] = o; } else tbl.rows.push(o);
+  map[o.uid] = o; tbl.dirty[o.uid] = o;
+}
+function putB_(db, b) { put_(db.B, db.b, b, db); }
+function putR_(db, r) { put_(db.R, db.r, r, db); }
+function putT_(db, t) { put_(db.T, db.t, t, db); }
+/** Remove a row's data (the row is blanked; other columns and rows are left alone). */
+function clearRow_(tbl, map, uid) {
+  var cur = map[uid];
+  if (!cur) return;
+  tbl.rows.splice(tbl.rows.indexOf(cur), 1); delete map[uid]; delete tbl.dirty[uid];
+  if (cur._row) tbl.cleared.push(cur._row);
+}
 function addTomb_(db, env, t) {
-  var row = { kind: t.kind, uid: t.uid, deletedAt: t.deletedAt || env.now(), mergedInto: t.mergedInto || '', rev: bump_(db, env) };
-  db.T.rows.push(row); db.t[t.uid] = row; db.T.dirty = true;
-  return row;
+  putT_(db, { kind: t.kind, uid: t.uid, deletedAt: t.deletedAt || env.now(), mergedInto: t.mergedInto || '', restoredAt: '' });
 }
-function dropRow_(tbl, map, uid) {
-  if (!map[uid]) return;
-  tbl.rows = tbl.rows.filter(function (x) { return x.uid !== uid; }); delete map[uid]; tbl.dirty = true;
+/** Mark a delete as undone (kept for the record; phones then accept the record again because it is newer than the delete). */
+function restoreTomb_(db, env, uid) {
+  var t = db.t[uid], o = {}, k;
+  for (k in t) o[k] = t[k];
+  o.restoredAt = env.now();
+  putT_(db, o);
 }
-function putB_(db, env, b) {
-  b.rev = bump_(db, env);
-  if (!db.b[b.uid]) db.B.rows.push(b); else db.B.rows[db.B.rows.indexOf(db.b[b.uid])] = b;
-  db.b[b.uid] = b; db.B.dirty = true;
-}
-function putR_(db, env, r) {
-  r.rev = bump_(db, env);
-  if (!db.r[r.uid]) db.R.rows.push(r); else db.R.rows[db.R.rows.indexOf(db.r[r.uid])] = r;
-  db.r[r.uid] = r; db.R.dirty = true;
+function copy_(x) { var o = {}, k; for (k in x) o[k] = x[k]; return o; }
+function flagB_(db, env, uid, text, at) {
+  var b = db.b[uid];
+  if (!b) return;
+  var nb = copy_(b), when = at || env.now();
+  nb.flag = text; nb.flagAt = when; if (when > nb.updatedAt) nb.updatedAt = when;
+  putB_(db, nb);
 }
 function liveClash_(db, name, notUid) {
   for (var i = 0; i < db.B.rows.length; i++) if (db.B.rows[i].uid !== notUid && sameName_(db.B.rows[i].name, name)) return db.B.rows[i];
   return null;
 }
-function relinkReadings_(db, env, fromUid, bh) {
-  for (var i = 0; i < db.R.rows.length; i++) {
-    var r = db.R.rows[i];
-    if (r.boreholeUid === fromUid) { r.boreholeUid = bh.uid; r.boreholeName = bh.name; r.rev = bump_(db, env); db.R.dirty = true; }
-    else if (r.boreholeUid === bh.uid && r.boreholeName !== bh.name) { r.boreholeName = bh.name; db.R.dirty = true; }
+function relinkReadings_(db, fromUid, bh) {
+  var rows = db.R.rows.slice();
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    if (r.boreholeUid === fromUid || (r.boreholeUid === bh.uid && r.boreholeName !== bh.name)) {
+      var n = copy_(r); n.boreholeUid = bh.uid; n.boreholeName = bh.name;
+      if (r.boreholeUid === fromUid) putR_(db, n); else { db.R.dirty[n.uid] = n; n._row = r._row; db.R.rows[db.R.rows.indexOf(r)] = n; db.r[n.uid] = n; }
+    }
   }
 }
+function liveReadingsOf_(db, buid) { return db.R.rows.filter(function (r) { return r.boreholeUid === buid; }); }
 
 function push_(db, req, env) {
-  var acked = [], i;
+  var acked = [], rejected = [], held = [], i;
   var T = req.tombstones || [], B = req.boreholes || [], R = req.readings || [];
   if (!(T instanceof Array) || !(B instanceof Array) || !(R instanceof Array)) throw new Error('Bad push');
-  if (T.length + B.length + R.length > MAX_ITEMS_) throw new Error('Too many changes in one request');
+  var day = env.now().slice(0, 10);
 
-  // 1. Deletes. A tombstone is permanent: nothing with that uid is ever stored again.
+  // 0. Validate everything first. Invalid items are rejected with a reason (the phone shows them as failed).
+  var tombs = [], bhs = [], rds = [];
   for (i = 0; i < T.length; i++) {
     var t = T[i];
-    if (!t || typeof t.uid !== 'string' || (t.kind !== 'borehole' && t.kind !== 'reading')) continue;
-    if (!db.t[t.uid]) {
-      addTomb_(db, env, { kind: t.kind, uid: t.uid, deletedAt: String(t.deletedAt || '') });
-      if (t.kind === 'reading') dropRow_(db.R, db.r, t.uid);
-      else {
-        dropRow_(db.B, db.b, t.uid);
-        var dead = db.R.rows.filter(function (r) { return r.boreholeUid === t.uid; });
-        for (var j = 0; j < dead.length; j++) { addTomb_(db, env, { kind: 'reading', uid: dead[j].uid, deletedAt: t.deletedAt }); dropRow_(db.R, db.r, dead[j].uid); }
+    if (!t || typeof t.uid !== 'string' || !t.uid || (t.kind !== 'borehole' && t.kind !== 'reading')) rejected.push({ key: 't:' + (t && t.uid), reason: 'Not a valid delete' });
+    else tombs.push({ kind: t.kind, uid: t.uid, deletedAt: String(t.deletedAt || '') || env.now() });
+  }
+  for (i = 0; i < B.length; i++) { var wb = whyB_(B[i]); if (wb) rejected.push({ key: 'b:' + (B[i] && B[i].uid), reason: wb }); else bhs.push(cleanB_(B[i])); }
+  for (i = 0; i < R.length; i++) { var wr = whyR_(R[i]); if (wr) rejected.push({ key: 'r:' + (R[i] && R[i].uid), reason: wr }); else rds.push(cleanR_(R[i])); }
+
+  // 1. Deletes, readings before boreholes. A delete loses to an edit made after it (the record is kept and flagged).
+  tombs.sort(function (a, b) { return (a.kind === 'reading' ? 0 : 1) - (b.kind === 'reading' ? 0 : 1); });
+  for (i = 0; i < tombs.length; i++) {
+    var tb = tombs[i];
+    acked.push('t:' + tb.uid);
+    if (dead_(db, tb.uid) || (db.t[tb.uid] && db.t[tb.uid].mergedInto)) continue;
+    if (tb.kind === 'reading') {
+      var cr = db.r[tb.uid];
+      if (cr && cr.updatedAt > tb.deletedAt) {
+        flagB_(db, env, cr.boreholeUid, 'Reading ' + cr.displayId + ' was deleted on a phone but edited later on another; it was kept ' + day + '. Delete it again if it is not wanted.');
+        putR_(db, copy_(cr));
+        continue;
       }
+      addTomb_(db, env, tb); clearRow_(db.R, db.r, tb.uid);
+    } else {
+      var cb = db.b[tb.uid];
+      if (!cb) { addTomb_(db, env, tb); continue; }
+      var left = liveReadingsOf_(db, tb.uid);
+      if (cb.updatedAt > tb.deletedAt || left.length) {
+        // Never delete readings implicitly: readings the deleting phone had not seen keep the borehole alive.
+        flagB_(db, env, tb.uid, left.length
+          ? 'Deleted on a phone, but ' + left.length + ' reading(s) that phone had not seen were kept ' + day + '. Check them, and delete the borehole again if it is not wanted.'
+          : 'Deleted on a phone but edited later on another; it was kept ' + day + '. Delete it again if it is not wanted.', after_(tb.deletedAt, env));
+        for (var j = 0; j < left.length; j++) putR_(db, copy_(left[j])); // so the deleting phone gets them back
+        continue;
+      }
+      addTomb_(db, env, tb); clearRow_(db.B, db.b, tb.uid);
     }
-    acked.push('t:' + t.uid);
   }
 
   // 2. Boreholes: field-by-field newest wins; same name (any case) as another borehole => merge + flag.
-  for (i = 0; i < B.length; i++) {
-    var b = cleanB_(B[i]);
-    if (!b) continue;
-    var key = 'b:' + b.uid;
+  for (i = 0; i < bhs.length; i++) {
+    var b = bhs[i], key = 'b:' + b.uid;
     var uid = canon_(db, b.uid);
-    if (db.t[uid]) { acked.push(key); continue; } // deleted: never resurrect
+    var gone = dead_(db, uid);
+    if (gone) {
+      if (!(b.updatedAt > gone.deletedAt)) { acked.push(key); continue; } // the delete is newer: it wins
+      restoreTomb_(db, env, uid); // edited after the delete: bring it back, flagged
+      if (!(b.flagAt > gone.deletedAt)) { b.flag = 'Deleted on a phone but edited later on another; it was kept ' + day + '. Delete it again if it is not wanted.'; b.flagAt = after_(gone.deletedAt, env); }
+    }
     b.uid = uid;
     var cur = db.b[uid];
     var merged = cur ? mergeBorehole_(cur, b) : b;
@@ -257,44 +375,44 @@ function push_(db, req, env) {
     if (clash) {
       var keep = mergeBorehole_(clash, merged);
       keep.uid = clash.uid; keep.name = clash.name; keep.nameAt = clash.nameAt;
-      keep.flag = 'Same Borehole Name was created on two phones; records merged ' + env.now().slice(0, 10) + '. Check the reference values.';
+      keep.flag = 'Same Borehole Name was created on two phones; records merged ' + day + '. Check the reference values.';
       keep.flagAt = env.now();
-      putB_(db, env, keep);
-      if (cur) dropRow_(db.B, db.b, uid);
+      putB_(db, keep);
+      if (cur) clearRow_(db.B, db.b, uid);
       addTomb_(db, env, { kind: 'borehole', uid: uid, mergedInto: keep.uid });
-      relinkReadings_(db, env, uid, keep);
+      relinkReadings_(db, uid, keep);
     } else if (!cur || bKey_(cur) !== bKey_(merged)) {
-      putB_(db, env, merged);
-      relinkReadings_(db, env, '', merged);
+      putB_(db, merged);
+      relinkReadings_(db, '', merged);
     }
     acked.push(key);
   }
 
   // 3. Readings: insert, or newest edit wins for depth/notes. Reference values, date/time, code and number never change.
-  for (i = 0; i < R.length; i++) {
-    var r = cleanR_(R[i]);
-    if (!r) continue;
-    var rk = 'r:' + r.uid;
-    if (db.t[r.uid]) { acked.push(rk); continue; }
+  for (i = 0; i < rds.length; i++) {
+    var r = rds[i], rk = 'r:' + r.uid;
+    var rgone = dead_(db, r.uid), restored = false;
+    if (rgone && !(r.updatedAt > rgone.deletedAt)) { acked.push(rk); continue; }
     var bu = canon_(db, r.boreholeUid);
-    if (db.t[bu]) { addTomb_(db, env, { kind: 'reading', uid: r.uid }); acked.push(rk); continue; } // its borehole was deleted
+    if (dead_(db, bu)) { held.push({ key: rk, reason: 'Its borehole was deleted on another phone; this phone will restore it' }); continue; }
     var bh = db.b[bu];
-    if (!bh) continue; // borehole not uploaded yet: leave it queued on the phone
+    if (!bh) { held.push({ key: rk, reason: 'Its borehole has not been uploaded yet' }); continue; }
+    if (rgone) { restoreTomb_(db, env, r.uid); restored = true; } // only once the row will really be stored
     var old = db.r[r.uid];
-    if (!old) putR_(db, env, readingRow_(r, bh));
+    if (!old) putR_(db, readingRow_(r, bh));
     else if (r.updatedAt > old.updatedAt) {
-      var upd = {}, k;
-      for (k in old) upd[k] = old[k];
+      var upd = copy_(old);
       upd.depthFt = r.depthFt; upd.notes = r.notes; upd.updatedAt = r.updatedAt;
       upd.waterElevationFt = Math.round((old.refElevationFt - r.depthFt) * 1e6) / 1e6;
-      putR_(db, env, upd);
+      putR_(db, upd);
     }
+    if (restored) flagB_(db, env, bh.uid, 'Reading ' + r.displayId + ' was deleted on a phone but edited later on another; it was kept ' + day + '. Delete it again if it is not wanted.');
     acked.push(rk);
   }
-  return { ok: true, acked: acked };
+  return { ok: true, acked: acked, rejected: rejected, held: held };
 }
 
-function pull_(db, since, env) {
+function pull_(db, since) {
   var after = function (x) { return Number(x.rev) > since; };
   return {
     ok: true,
@@ -310,6 +428,7 @@ function pull_(db, since, env) {
     tombstones: db.T.rows.filter(after).map(function (t) {
       var o = { uid: t.uid, kind: t.kind, deletedAt: t.deletedAt };
       if (t.mergedInto) o.mergedInto = t.mergedInto;
+      if (t.restoredAt) o.restoredAt = t.restoredAt;
       return o;
     })
   };

@@ -1,10 +1,13 @@
-import type { AdapterStatus, BoreholeRec, PullResult, PushBatch, PushResult, ReadingRec, SyncAdapter, TombRec } from './types';
+import type { AdapterStatus, BoreholeRec, ItemNote, PullResult, PushBatch, PushResult, ReadingRec, SyncAdapter, TombRec } from './types';
 import { mergeBorehole, mergeReading } from './merge';
 
+const later = (iso: string) => { const n = new Date().toISOString(); return n > iso ? n : new Date(Date.parse(iso) + 1).toISOString(); };
+
 /**
- * In-memory backend for tests and demos: same contract as the Sheet (idempotent upserts, tombstones win,
- * per-field merge, pull since a revision cursor). `failNext` simulates lost signal / server errors.
- * (Same-name merging is only implemented in the real Apps Script; see Code.gs.)
+ * In-memory backend for tests and demos, with the same rules as Code.gs (0.4.1): idempotent upserts, per-field merge,
+ * pull since a revision cursor, deletes never cascade to readings the deleter had not seen, a delete loses to a newer
+ * edit (record restored and flagged), invalid items are rejected with a reason, readings of a deleted/missing borehole are held.
+ * `failNext` simulates lost signal; `reject` lets a test refuse items. Same-name merging is only implemented in Code.gs.
  */
 export class MockAdapter implements SyncAdapter {
   readonly kind = 'mock';
@@ -14,34 +17,64 @@ export class MockAdapter implements SyncAdapter {
   t = new Map<string, TombRec & { rev: number }>();
   failNext = 0;
   dropAcks = false;
+  reject: (key: string) => string | undefined = () => undefined;
   calls: string[] = [];
   private gate(op: string) { this.calls.push(op); if (this.failNext > 0) { this.failNext--; throw new Error('Could not reach the sync server (no signal?)'); } }
+  private dead(uid: string) { const t = this.t.get(uid); return !!t && !t.restoredAt; }
+  private restore(uid: string) { const t = this.t.get(uid)!; this.t.set(uid, { ...t, restoredAt: new Date().toISOString(), rev: ++this.rev }); }
+  private flag(uid: string, why: string, at: string) {
+    const b = this.b.get(uid); if (!b) return;
+    this.b.set(uid, { ...b, flag: why, flagAt: at, updatedAt: at > b.updatedAt ? at : b.updatedAt, rev: ++this.rev });
+  }
   async push(x: PushBatch): Promise<PushResult> {
     this.gate('push');
-    const acked: string[] = [];
-    for (const t of x.tombstones) {
-      if (!this.t.has(t.uid)) this.t.set(t.uid, { ...t, rev: ++this.rev });
-      this.b.delete(t.uid); this.r.delete(t.uid);
-      if (t.kind === 'borehole') for (const [k, r] of this.r) if (r.boreholeUid === t.uid) { this.r.delete(k); this.t.set(k, { uid: k, kind: 'reading', deletedAt: t.deletedAt, rev: ++this.rev }); }
+    const acked: string[] = [], rejected: ItemNote[] = [], held: ItemNote[] = [];
+    const ok = (key: string) => { const why = this.reject(key); if (why) rejected.push({ key, reason: why }); return !why; };
+    const tombs = [...x.tombstones].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'reading' ? -1 : 1));
+    for (const t of tombs) {
+      if (!ok(`t:${t.uid}`)) continue;
+      if (t.kind === 'reading') {
+        const cur = this.r.get(t.uid);
+        if (cur && cur.updatedAt > t.deletedAt) this.flag(cur.boreholeUid, `Reading ${cur.displayId} was deleted on a phone but edited later, so it was kept`, later(t.deletedAt));
+        else if (!this.dead(t.uid)) { this.r.delete(t.uid); this.t.set(t.uid, { ...t, rev: ++this.rev }); }
+      } else {
+        const cur = this.b.get(t.uid);
+        const left = [...this.r.values()].filter((r) => r.boreholeUid === t.uid);
+        if (cur && (cur.updatedAt > t.deletedAt || left.length)) {
+          this.flag(t.uid, left.length ? `Deleted on a phone, but ${left.length} reading(s) that phone had not seen were kept` : 'Deleted on a phone but edited later, so it was kept', later(t.deletedAt));
+          for (const r of left) this.r.set(r.uid, { ...r, rev: ++this.rev });
+        } else if (!this.dead(t.uid)) { this.b.delete(t.uid); this.t.set(t.uid, { ...t, rev: ++this.rev }); }
+      }
       acked.push(`t:${t.uid}`);
     }
     for (const b of x.boreholes) {
-      if (!this.t.has(b.uid)) {
-        const cur = this.b.get(b.uid);
-        const m = cur ? mergeBorehole(cur, b) : b;
-        if (!cur || JSON.stringify({ ...m, rev: 0 }) !== JSON.stringify({ ...cur, rev: 0 })) this.b.set(b.uid, { ...m, rev: ++this.rev });
+      const key = `b:${b.uid}`;
+      if (!b.name.trim()) { rejected.push({ key, reason: 'Borehole Name is empty' }); continue; }
+      if (!ok(key)) continue;
+      if (this.dead(b.uid)) {
+        if (b.updatedAt > this.t.get(b.uid)!.deletedAt) this.restore(b.uid); else { acked.push(key); continue; }
       }
-      acked.push(`b:${b.uid}`);
+      const cur = this.b.get(b.uid);
+      const m = cur ? mergeBorehole(cur, b) : b;
+      if (!cur || JSON.stringify({ ...m, rev: 0 }) !== JSON.stringify({ ...cur, rev: 0 })) this.b.set(b.uid, { ...m, rev: ++this.rev });
+      acked.push(key);
     }
     for (const r of x.readings) {
-      if (this.t.has(r.uid)) { acked.push(`r:${r.uid}`); continue; }
-      if (!this.b.has(r.boreholeUid)) { if (this.t.has(r.boreholeUid)) acked.push(`r:${r.uid}`); continue; }
+      const key = `r:${r.uid}`;
+      if (!(r.depthFt >= 0)) { rejected.push({ key, reason: 'Depth is negative' }); continue; }
+      if (!ok(key)) continue;
+      if (this.dead(r.uid)) {
+        if (r.updatedAt > this.t.get(r.uid)!.deletedAt) { this.restore(r.uid); this.flag(r.boreholeUid, `Reading ${r.displayId} was deleted on a phone but edited later, so it was restored`, r.updatedAt); }
+        else { acked.push(key); continue; }
+      }
+      if (this.dead(r.boreholeUid)) { held.push({ key, reason: 'Its borehole was deleted on another phone; this phone will restore it' }); continue; }
+      if (!this.b.has(r.boreholeUid)) { held.push({ key, reason: 'Its borehole is not on the sheet yet' }); continue; }
       const cur = this.r.get(r.uid);
       const m = cur ? mergeReading(cur, r) : r;
       if (!cur || m.updatedAt !== cur.updatedAt) this.r.set(r.uid, { ...m, rev: ++this.rev });
-      acked.push(`r:${r.uid}`);
+      acked.push(key);
     }
-    return { acked: this.dropAcks ? [] : acked };
+    return { acked: this.dropAcks ? [] : acked, rejected, held };
   }
   async pull(since: number): Promise<PullResult> {
     this.gate('pull');

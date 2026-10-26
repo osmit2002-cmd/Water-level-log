@@ -14,6 +14,8 @@ export interface Backup {
   nextReadingId: number;
   boreholes: Borehole[];
   readings: Reading[];
+  /** 0.4.1: changes the sheet refused (still queued) and failed changes the user discarded. Kept for recovery by hand; not restored. */
+  unsynced?: { failed: unknown[]; discarded: unknown[] };
 }
 export interface RestoreResult {
   backup: Backup;
@@ -22,8 +24,10 @@ export interface RestoreResult {
   skipped: number;
 }
 
-export function makeBackup(boreholes: Borehole[], readings: Reading[], settings: Settings, nextReadingId: number, app: string): Backup {
-  return { format: BACKUP_FORMAT, version: BACKUP_VERSION, exportedAt: new Date().toISOString(), app, settings, nextReadingId, boreholes, readings };
+export function makeBackup(boreholes: Borehole[], readings: Reading[], settings: Settings, nextReadingId: number, app: string, unsynced?: Backup['unsynced']): Backup {
+  const b: Backup = { format: BACKUP_FORMAT, version: BACKUP_VERSION, exportedAt: new Date().toISOString(), app, settings, nextReadingId, boreholes, readings };
+  if (unsynced && (unsynced.failed.length || unsynced.discarded.length)) b.unsynced = unsynced;
+  return b;
 }
 
 const isNum = (v: unknown) => typeof v === 'number' && Number.isFinite(v);

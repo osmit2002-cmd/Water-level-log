@@ -98,3 +98,16 @@ td.notes { min-width: 140px; white-space: normal; }
 .sheet h3 { margin: 0; }
 .ucrow { display: flex; gap: 8px; align-items: stretch; }
 .ucrow input { flex: 1; }
+/* 0.4.1: failed changes and edit conflicts */
+.sync-badge.failed { background: #ffd9d6; color: #8a1200; border-color: #c62a1a; }
+.sync-badge.failed::before { content: '! '; }
+.failed-list ul { list-style: none; padding: 0; margin: 8px 0 0; }
+.failed-list li { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; padding: 8px 0; border-top: 1px solid rgba(0,0,0,.12); }
+.failed-list .row-btns { display: flex; gap: 8px; }
+.failed-list button { min-height: 44px; }
+.conflict { border: 2px solid #e0b400; background: #fff8dc; color: #3d2e00; border-radius: 10px; padding: 12px; margin: 8px 0; }
+.conflict dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 8px 0; }
+.conflict dt { font-weight: 600; }
+.conflict button { width: 100%; margin-top: 8px; min-height: 48px; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .conflict { background: #3a3000; color: #fff3c4; } }
+:root[data-theme='dark'] .conflict { background: #3a3000; color: #fff3c4; }

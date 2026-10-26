@@ -10,12 +10,27 @@ class FakeRange {
     for (let i = 0; i < this.nr; i++) { const row = []; for (let j = 0; j < this.nc; j++) row.push(this.sh.data[this.r - 1 + i]?.[this.c - 1 + j] ?? ''); out.push(row); }
     return out;
   }
+  /** Like Sheets: '' unless the cell holds a formula. */
+  getFormulas() {
+    const out = [];
+    for (let i = 0; i < this.nr; i++) { const row = []; for (let j = 0; j < this.nc; j++) row.push(this.sh.formulas.get(`${this.r + i},${this.c + j}`) ?? ''); out.push(row); }
+    return out;
+  }
   setValues(v) {
     if (v.length !== this.nr || v.some((row) => row.length !== this.nc)) throw new Error('setValues: size mismatch');
+    const ss = this.sh.ss;
+    if (ss && ss.failAfter != null && ss.failAfter-- <= 0) { ss.failAfter = null; throw new Error('Exceeded maximum execution time'); }
     if (this.r - 1 + this.nr > this.sh.maxRows) throw new Error('The coordinates of the range are outside the dimensions of the sheet.');
     // Like Sheets: a leading ' only marks the cell as literal text (kept in .quoted for assertions) and is not stored.
-    v = v.map((row) => row.map((x) => { if (typeof x === 'string' && x.charAt(0) === "'") { this.sh.quoted.add(x.slice(1)); return x.slice(1); } return x; }));
-    v.forEach((row, i) => row.forEach((x, j) => { (this.sh.data[this.r - 1 + i] ??= [])[this.c - 1 + j] = x; }));
+    // A string starting with = becomes a formula (its value here is "#FORMULA").
+    v.forEach((row, i) => row.forEach((x, j) => {
+      const key = `${this.r + i},${this.c + j}`;
+      this.sh.formulas.delete(key);
+      if (typeof x === 'string' && x.charAt(0) === "'") { this.sh.quoted.add(x.slice(1)); x = x.slice(1); }
+      else if (typeof x === 'string' && x.charAt(0) === '=') { this.sh.formulas.set(key, x); x = '#FORMULA'; }
+      (this.sh.data[this.r - 1 + i] ??= [])[this.c - 1 + j] = x;
+    }));
+    this.sh.rowsWritten += v.length;
     this.sh.writes++;
     return this;
   }
@@ -23,7 +38,7 @@ class FakeRange {
   setNumberFormat(f) { this.sh.formats.push([this.c, f]); return this; }
 }
 export class FakeSheet {
-  constructor(name) { this.name = name; this.data = []; this.formats = []; this.writes = 0; this.frozen = 0; this.maxRows = 1000; this.quoted = new Set(); }
+  constructor(name) { this.name = name; this.data = []; this.formats = []; this.writes = 0; this.frozen = 0; this.maxRows = 1000; this.quoted = new Set(); this.formulas = new Map(); this.rowsWritten = 0; }
   trim() { while (this.data.length && this.data[this.data.length - 1].every((x) => x === '' || x == null)) this.data.pop(); }
   getLastRow() { this.trim(); return this.data.length; }
   getLastColumn() { return Math.max(0, ...this.data.map((r) => r.length)); }
@@ -35,9 +50,9 @@ export class FakeSheet {
   objects() { const [h, ...rows] = this.data; return rows.map((r) => Object.fromEntries(h.map((k, i) => [k, r[i] ?? '']))); }
 }
 export class FakeSpreadsheet {
-  constructor() { this.sheets = new Map(); }
+  constructor() { this.sheets = new Map(); /** Test hook: the Nth setValues from now throws (simulated timeout). */ this.failAfter = null; }
   getSheetByName(n) { return this.sheets.get(n) ?? null; }
-  insertSheet(n) { const s = new FakeSheet(n); this.sheets.set(n, s); return s; }
+  insertSheet(n) { const s = new FakeSheet(n); s.ss = this; this.sheets.set(n, s); return s; }
 }
 export function fakeEnv({ team = 'TEAM-123', clock } = {}) {
   const store = new Map(team === null ? [] : [['TEAM_CODE', team]]);

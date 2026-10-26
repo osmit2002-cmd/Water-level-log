@@ -4,7 +4,7 @@ import { BOREHOLE_FIELDS } from './types';
 import type { BoreholePatch } from './csv';
 import { migrateV1, type V1Borehole, type V1Reading } from './migrate';
 import { displayId, uuid } from './ids';
-import type { BoreholeRec, ReadingRec, TombRec } from '../sync/types';
+import type { BoreholeRec, ItemNote, PullResult, ReadingRec, TombRec } from '../sync/types';
 
 /** One queued change. Keyed "b:uid" / "r:uid" / "t:uid" so repeated edits of one record coalesce. */
 export interface OutboxItem {
@@ -13,7 +13,13 @@ export interface OutboxItem {
   rec: BoreholeRec | ReadingRec | TombRec;
   /** Changes on every enqueue; an ack only removes the item if it was not changed again meanwhile. */
   ver: string;
+  /** Why the sheet refused it (0.4.1). Failed items are kept but not resent until the user taps Retry. */
+  failed?: string;
+  failedAt?: string;
 }
+/** A failed change the user chose to discard: kept here (and in backups) so it can still be recovered by hand. */
+export interface DiscardedItem { item: OutboxItem; discardedAt: string }
+export const DISCARDED = 'discardedChanges';
 
 interface WLSchema extends DBSchema {
   boreholes: { key: string; value: Borehole; indexes: { byUid: string } };
@@ -144,6 +150,15 @@ export async function getNextReadingId(): Promise<number> {
 }
 export const outboxAll = async () => (await db()).getAll('outbox');
 export const outboxCount = async () => (await db()).count('outbox');
+export async function outboxStats() {
+  const all = await outboxAll();
+  const failed = all.filter((x) => x.failed);
+  return { waiting: all.length - failed.length, failed };
+}
+export const getReading = async (id: number) => (await db()).get('readings', id);
+export const getBorehole = async (name: string) => (await db()).get('boreholes', name);
+export const getBoreholeByUid = async (uid: string) => (await db()).getFromIndex('boreholes', 'byUid', uid);
+export const getDiscarded = async () => (((await (await db()).get('meta', DISCARDED))?.value as DiscardedItem[] | undefined) ?? []);
 export const allTombstones = async () => (await db()).getAll('tombstones');
 
 /** Insert a new reading: next local key, next running number for the display ID, a uid, and an outbox entry. Returns the local key. */
@@ -177,6 +192,9 @@ export async function updateReading(r: Reading) {
   try {
     const boreholeUid = await bhUid(tx, r.borehole);
     const full = { ...r, uid: r.uid ?? uuid(), boreholeUid };
+    // Saving over a reading that was deleted meanwhile (the user confirmed it) brings it back: drop the local delete.
+    // The edit is newer than the delete, so the sheet restores it too (and flags its borehole).
+    if (await tx.objectStore('tombstones').getKey(full.uid)) { await tx.objectStore('tombstones').delete(full.uid); await tx.objectStore('outbox').delete(`t:${full.uid}`); }
     await tx.objectStore('readings').put(full);
     await queue(tx, 'reading', toRRec(full));
     await tx.done;
@@ -230,6 +248,8 @@ export async function saveBorehole(b: Borehole, oldName?: string) {
   if (clash && clash !== oldName) { tx.abort(); throw new Error(`A borehole named ${clash} already exists`); }
   const old = oldName ? await bs.get(oldName) : undefined;
   const nb = stampFields(old, b, b.updatedAt);
+  // Re-saving a borehole that was deleted meanwhile (user confirmed it in the conflict panel): drop the local delete.
+  if (await tx.objectStore('tombstones').getKey(nb.uid!)) { await tx.objectStore('tombstones').delete(nb.uid!); await tx.objectStore('outbox').delete(`t:${nb.uid}`); }
   await putBorehole(tx, nb, oldName);
   await queue(tx, 'borehole', toBRec(nb));
   await tx.done;
@@ -338,6 +358,84 @@ export async function outboxAck(sent: OutboxItem[], acked: string[]) {
   }
   await tx.done;
 }
+/** Mark items the server refused (only if unchanged since they were sent; a newer edit gets a fresh try). */
+export async function outboxFail(sent: OutboxItem[], rejected: ItemNote[]) {
+  const why = new Map(rejected.map((x) => [x.key, x.reason]));
+  const tx = await rw(['outbox']);
+  const at = new Date().toISOString();
+  for (const s of sent) {
+    const reason = why.get(s.key);
+    if (!reason) continue;
+    const cur = await tx.objectStore('outbox').get(s.key);
+    if (cur && cur.ver === s.ver) await tx.objectStore('outbox').put({ ...cur, failed: reason, failedAt: at });
+  }
+  await tx.done;
+}
+/** Retry one failed item (or all of them): clear the failure so the next sync sends it again. */
+export async function retryFailed(key?: string) {
+  const tx = await rw(['outbox']);
+  for (const it of await tx.objectStore('outbox').getAll()) {
+    if (!it.failed || (key && it.key !== key)) continue;
+    const { failed: _f, failedAt: _a, ...rest } = it;
+    await tx.objectStore('outbox').put({ ...rest, ver: ver() });
+  }
+  await tx.done;
+  queued();
+}
+/** Stop trying to sync one failed change. The record on this phone is untouched; the change is kept in meta and in backups. */
+export async function discardFailed(key: string) {
+  const tx = await rw(['outbox', 'meta']);
+  const it = await tx.objectStore('outbox').get(key);
+  if (it?.failed) {
+    const list = ((await tx.objectStore('meta').get(DISCARDED))?.value as DiscardedItem[] | undefined) ?? [];
+    await tx.objectStore('meta').put({ key: DISCARDED, value: [...list, { item: it, discardedAt: new Date().toISOString() }] });
+    await tx.objectStore('outbox').delete(key);
+  }
+  await tx.done;
+}
+
+/**
+ * Turning sync on (0.4.1, fix #8): records restored from an old (v1-v3) backup get NEW uids, so uploading them would
+ * duplicate what the sheet already has. Before queueing anything, give local records the sheet's uid when they match
+ * by natural key: borehole name (case-insensitive); reading = borehole name + date/time + depth (+-1e-6 ft) + User Code.
+ * Returns how many records were matched.
+ */
+export async function adoptRemoteIds(p: PullResult): Promise<{ boreholes: number; readings: number }> {
+  const tx = await rw(ALL);
+  let nb = 0, nr = 0;
+  try {
+    const bs = tx.objectStore('boreholes'), rs = tx.objectStore('readings'), ob = tx.objectStore('outbox');
+    const remoteB = new Set(p.boreholes.map((b) => b.uid));
+    const remoteR = new Set(p.readings.map((r) => r.uid));
+    const nameOf = new Map(p.boreholes.map((b) => [b.uid, b.name]));
+    for (const rb of p.boreholes) {
+      const k = findName(await bs.getAllKeys(), rb.name);
+      const lb = k ? await bs.get(k) : undefined;
+      if (!lb || lb.uid === rb.uid || (lb.uid && remoteB.has(lb.uid))) continue;
+      if (lb.uid) await ob.delete(`b:${lb.uid}`);
+      await bs.put({ ...fillBorehole(lb), uid: rb.uid });
+      for (const r of await rs.index('byBorehole').getAll(lb.name)) { await rs.put({ ...r, boreholeUid: rb.uid }); await ob.delete(`r:${r.uid}`); } // re-queued with the new link
+      nb++;
+    }
+    const all = await rs.getAll();
+    const used = new Set<number>();
+    for (const rr of p.readings) {
+      if (all.some((r) => r.uid === rr.uid)) continue;
+      const bname = (nameOf.get(rr.boreholeUid) ?? rr.boreholeName ?? '').toLowerCase();
+      const m = all.find((r) => !used.has(r.id) && !(r.uid && remoteR.has(r.uid)) && r.borehole.toLowerCase() === bname &&
+        r.datetime === rr.datetime && Math.abs(r.depthFt - rr.depthFt) < 1e-6 && (r.userCode ?? '') === (rr.userCode ?? ''));
+      if (!m) continue;
+      if (m.uid) await ob.delete(`r:${m.uid}`);
+      const next = { ...m, uid: rr.uid, seq: rr.seq };
+      used.add(m.id);
+      await rs.put(next);
+      nr++;
+    }
+    await tx.done;
+  } catch (e) { try { tx.abort(); } catch { /* done */ } throw e; }
+  return { boreholes: nb, readings: nr };
+}
+
 export async function resetCursor() { await (await db()).put('meta', { key: CURSOR, value: 0 }); }
 export async function getCursor() { return ((await (await db()).get('meta', CURSOR))?.value as number | undefined) ?? 0; }
 

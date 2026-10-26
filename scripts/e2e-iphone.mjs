@@ -299,12 +299,13 @@ await ctx2.close();
 const gs = loadCodeGs();
 const server = fakeEnv({ team: 'river-team-7' });
 let serverDown = false;
+let mangle = null; // test hook: corrupt a request body before the "sheet" sees it
 const serve = async (route) => {
   const req = route.request();
   if (serverDown) return route.abort('internetdisconnected');
   if (req.method() !== 'POST') return route.fulfill({ status: 405, body: '' });
   const ct = req.headers()['content-type'] ?? '';
-  const out = ct.startsWith('text/plain') ? gs.handleRequest_(req.postData() ?? '', server) : { ok: false, error: 'expected text/plain' };
+  const out = ct.startsWith('text/plain') ? gs.handleRequest_(mangle ? mangle(req.postData() ?? '') : (req.postData() ?? ''), server) : { ok: false, error: 'expected text/plain' };
   await route.fulfill({ status: 200, contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify(out) });
 };
 const sheetRows = (n) => server.ss.getSheetByName(n)?.objects() ?? [];
@@ -441,6 +442,71 @@ await pb.waitForSelector('[data-testid=bh-flag]', { state: 'detached' });
 await waitBadge(pb, 'synced').catch(() => {});
 for (let i = 0; i < 40 && sheetRows('Boreholes').find((b) => /mw-9/i.test(b['Borehole Name']))['Check Flag']; i++) await pb.waitForTimeout(250);
 ok(!sheetRows('Boreholes').find((b) => /mw-9/i.test(b['Borehole Name']))['Check Flag'], '"Mark checked" clears the flag on the Sheet');
+
+// ---------- 0.4.1 hardening ----------
+const snapP = async (p, name, sel) => { await p.evaluate((q) => document.querySelector(q)?.scrollIntoView({ block: 'start' }), sel); await p.screenshot({ path: `${shots}/${name}` }); };
+const localId = async (p, disp) => { await p.goto(url + '#/readings'); return p.$$eval('[data-testid=readings-table] tbody tr', (trs, d) => trs.find((t) => t.querySelector('td')?.textContent.trim() === d)?.dataset.readingId, disp); };
+const syncNow = async (p) => { await p.goto(url + '#/settings'); await p.click('[data-testid=sync-now]'); await waitBadge(p, 'synced'); };
+// #3 A hand edit on the Sheet to another row survives the app's next sync (row upserts, not a full rewrite).
+{
+  const sh = server.ss.getSheetByName('Readings');
+  const hdr = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
+  const rows = sh.getRange(2, 1, sh.getLastRow() - 1, hdr.length).getValues();
+  const idCol = hdr.indexOf('Reading ID'), notesCol = hdr.indexOf('Notes');
+  const ri = rows.findIndex((r) => r[idCol] !== 'OD-1-0001');
+  var handId = rows[ri][idCol];
+  sh.getRange(ri + 2, notesCol + 1, 1, 1).setValues([['checked by hand']]);
+  sh.getRange(ri + 2, hdr.length + 1, 1, 1).setValues([['my own column']]);
+}
+// #6 Phone A opens OD-1-0001; phone B changes it and syncs; A's save shows the newer values and asks.
+const aId = await localId(pa, 'OD-1-0001'), bId = await localId(pb, 'OD-1-0001');
+await pa.goto(url + `#/reading/${aId}`);
+await pa.waitForSelector('[data-testid=rd-depth]');
+await pb.goto(url + `#/reading/${bId}`);
+await pb.fill('[data-testid=rd-depth]', '4.25');
+await pb.click('[data-testid=rd-save]');
+await pb.waitForSelector('[data-testid=history]');
+for (let i = 0; i < 40 && sheetRows('Readings').find((r) => r['Reading ID'] === 'OD-1-0001')['Depth to Top of Water (ft)'] !== 4.25; i++) await pb.waitForTimeout(250);
+await pa.evaluate(() => window.dispatchEvent(new Event('online'))); // A syncs in the background while its form is open
+await pa.waitForTimeout(2500);
+await pa.fill('[data-testid=rd-notes]', 'mine');
+await pa.click('[data-testid=rd-save]');
+await pa.waitForSelector('[data-testid=rd-conflict]');
+ok((await pa.textContent('[data-testid=rd-conflict-newer]')).includes('4.25'), '#6 stale edit form: save shows the newer values and asks');
+if (shots) await snapP(pa, '13-edit-conflict.png', '[data-testid=rd-conflict]');
+await pa.click('[data-testid=rd-conflict-mine]');
+await pa.waitForSelector('[data-testid=history]');
+for (let i = 0; i < 40 && sheetRows('Readings').find((r) => r['Reading ID'] === 'OD-1-0001').Notes !== 'mine'; i++) await pa.waitForTimeout(250);
+ok(sheetRows('Readings').find((r) => r['Reading ID'] === 'OD-1-0001').Notes === 'mine', '#6 "Save mine anyway" overwrites after confirmation');
+ok(sheetRows('Readings').find((r) => r['Reading ID'] === handId).Notes === 'checked by hand' && server.ss.getSheetByName('Readings').getRange(2, 1, server.ss.getSheetByName('Readings').getLastRow() - 1, server.ss.getSheetByName('Readings').getLastColumn()).getValues().some((r) => r.includes('my own column')), '#3 hand edits to other rows and extra columns survive a sync');
+// #5 A change the Sheet rejects shows as "1 failed" with the reason; Retry and Discard work.
+mangle = (b) => { const j = JSON.parse(b); for (const r of j.readings ?? []) if (r.depthFt === 7.77) r.datetime = 'not a date'; return JSON.stringify(j); };
+const addOn = async (p, depth) => { await p.goto(url + '#/reading/new?bh=MW-2'); await p.fill('[data-testid=rd-depth]', depth); await p.click('[data-testid=rd-save]'); await p.waitForSelector('[data-testid=history]'); };
+await addOn(pa, '7.77');
+await pa.goto(url + '#/settings'); await pa.click('[data-testid=sync-now]');
+await waitBadge(pa, 'failed');
+ok((await pa.textContent('[data-testid=sync-badge]')).includes('1 failed') && (await pa.textContent('[data-testid=failed-reason]')).includes('date/time is not valid'), '#5 rejected change shows "1 failed" with the reason');
+if (shots) await snapP(pa, '14-sync-failed.png', '[data-testid=sync-failed]');
+mangle = null;
+await pa.click('[data-testid=failed-retry]');
+await waitBadge(pa, 'synced');
+ok(sheetRows('Readings').some((r) => r['Depth to Top of Water (ft)'] === 7.77), '#5 Retry sends it again once fixed');
+mangle = (b) => { const j = JSON.parse(b); for (const r of j.readings ?? []) if (r.depthFt === 8.88) r.datetime = 'not a date'; return JSON.stringify(j); };
+await addOn(pa, '8.88');
+await pa.goto(url + '#/settings'); await pa.click('[data-testid=sync-now]');
+await waitBadge(pa, 'failed');
+let asked = '';
+pa.once('dialog', (d) => { asked = d.message(); d.dismiss(); });
+await pa.click('[data-testid=failed-discard]');
+await pa.waitForTimeout(300);
+ok(asked.length > 0 && await badge(pa) === 'failed', '#5 Discard asks first; cancelling keeps it');
+pa.once('dialog', (d) => d.accept());
+await pa.click('[data-testid=failed-discard]');
+await waitBadge(pa, 'synced');
+const kept = await pa.evaluate(() => new Promise((res) => { const q = indexedDB.open('water-level-log'); setTimeout(() => res(-3), 3000); q.onsuccess = () => { try { const t = q.result.transaction('meta').objectStore('meta').get('discardedChanges'); t.onsuccess = () => res(t.result?.value?.length ?? 0); t.onerror = () => res(-1); } catch (e) { res(String(e)); } }; q.onerror = () => res(-1); }));
+ok(kept === 1, `#5 discarded change is kept locally for the backup (${kept})`);
+mangle = null;
+await syncNow(pb);
 
 // Error state: the team code is changed on the Sheet; this phone shows an error and keeps its changes.
 server._store.set('TEAM_CODE', 'new-code-2027');

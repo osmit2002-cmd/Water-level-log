@@ -2,20 +2,35 @@ import { displayId } from '../lib/ids';
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useStore } from '../store';
-import { addReading, deleteReading, updateReading } from '../lib/db';
+import { addReading, deleteReading, getReading, updateReading } from '../lib/db';
+import { staleReading, type Stale } from '../lib/conflict';
+import type { Reading } from '../lib/types';
 import UserCodeSheet from '../UserCodeSheet';
 import { fmt2, fmtLen, fromUnit, nowLocal, parseDecimal, round2, toUnit } from '../lib/math';
 
 const LAST_BH = 'wll-last-borehole';
 
+/**
+ * The form keeps the version of the reading it opened with (`old`). A sync may change or delete the record while the
+ * form is open (fix #6): the form keeps what the user started from, and Save checks it against what is stored now.
+ */
 export default function ReadingForm() {
   const { id: idParam } = useParams();
+  const { readings, ready } = useStore();
+  const live = idParam ? readings.find((r) => String(r.id) === idParam) : undefined;
+  const [base, setBase] = useState<Reading | undefined>(live);
+  useEffect(() => { if (!base && live) setBase(live); }, [base, live]);
+  if (idParam && !base) return ready ? <p>Reading not found. <Link to="/readings">Back</Link></p> : null;
+  return <Form key={base ? `${base.uid}@${base.updatedAt}` : 'new'} old={base} rebase={setBase} />;
+}
+
+function Form({ old, rebase }: { old?: Reading; rebase: (r: Reading) => void }) {
   const [qs] = useSearchParams();
-  const { boreholes, bhMap, readings, settings, setSettings, reload } = useStore();
+  const { boreholes, bhMap, settings, setSettings, reload } = useStore();
   const [askCode, setAskCode] = useState(false);
   const u = settings.unit;
   const nav = useNavigate();
-  const old = idParam ? readings.find((r) => String(r.id) === idParam) : undefined;
+  const [conflict, setConflict] = useState<{ st: NonNullable<Stale>; cur?: Reading }>();
   const initialBh = old?.borehole ?? qs.get('bh') ?? localStorage.getItem(LAST_BH) ?? '';
   const [bh, setBh] = useState(bhMap.has(initialBh) ? initialBh : boreholes[0]?.name ?? '');
   const [depth, setDepth] = useState(old ? fmt2(toUnit(old.depthFt, u)) : '');
@@ -34,7 +49,6 @@ export default function ReadingForm() {
   const refPoint = old ? old.referencePoint : b?.referencePoint ?? '';
   const okDepth = depthFt != null && depthFt >= 0;
 
-  if (idParam && !old) return <p>Reading not found. <Link to="/readings">Back</Link></p>;
   if (!boreholes.length) return <p className="empty">Add a borehole first. <Link to="/new-borehole">+ Borehole</Link></p>;
 
   async function save(e: React.FormEvent) {
@@ -46,16 +60,21 @@ export default function ReadingForm() {
     if (depthNum < 0) return setErr('Depth to top of water cannot be negative');
     // New readings need this phone's User Code; ask for it without leaving (or clearing) the form.
     if (!old && !settings.userCode) return setAskCode(true);
+    if (old) {
+      const cur = await getReading(old.id);
+      const st = staleReading(old, cur?.uid === old.uid ? cur : undefined);
+      if (st) return setConflict({ st, cur: cur?.uid === old.uid ? cur : undefined });
+    }
     await commit(settings.userCode);
   }
-  async function commit(userCode: string) {
+  async function commit(userCode: string, onto?: Reading) {
     if (committing.current) return;
     committing.current = true;
     setSaving(true);
     const now = new Date();
     try {
       if (old) {
-        await updateReading({ ...old, depthFt: depthFt!, notes: notes.trim() || undefined, updatedAt: now.toISOString() });
+        await updateReading({ ...(onto ?? old), depthFt: depthFt!, notes: notes.trim() || undefined, updatedAt: now.toISOString() });
       } else {
         // Date and time come from the phone clock at the moment of saving; reference values are snapshotted.
         await addReading({ borehole: bh, datetime: nowLocal(now), referencePoint: b!.referencePoint, refElevationFt: b!.refElevationFt,
@@ -99,7 +118,28 @@ export default function ReadingForm() {
           : <>User Code: <b data-testid="rd-code">{settings.userCode || 'not set'}</b>{settings.userCode ? ' (from Settings)' : ' — you will be asked on Save'}.</>}
       </div>
       {err && <p className="error" role="alert">{err}</p>}
-      <button type="submit" className="primary" data-testid="rd-save" disabled={saving}>Save reading</button>
+      {conflict && (
+        <div className="conflict" role="alertdialog" aria-labelledby="cf-h" data-testid="rd-conflict">
+          <p id="cf-h"><strong>{conflict.st.kind === 'deleted' ? 'This reading was deleted on another phone while you were editing.' : 'This reading was changed on another phone while you were editing.'}</strong></p>
+          {conflict.cur && (
+            <dl className="small" data-testid="rd-conflict-newer">
+              <dt>Newer depth</dt><dd>{fmt2(toUnit(conflict.cur.depthFt, u))} {u}</dd>
+              <dt>Newer notes</dt><dd>{conflict.cur.notes || '—'}</dd>
+              <dt>Changed</dt><dd>{new Date(conflict.cur.updatedAt).toLocaleString()}</dd>
+            </dl>
+          )}
+          <p className="small">Yours: {depth} {u}{notes.trim() ? `, notes "${notes.trim()}"` : ''}.</p>
+          <button type="button" className="primary" data-testid="rd-conflict-mine" onClick={() => { const c = conflict; setConflict(undefined); void commit(settings.userCode, c.cur); }}>
+            {conflict.st.kind === 'deleted' ? 'Restore it with my values' : 'Save mine (replace newer)'}
+          </button>
+          <button type="button" data-testid="rd-conflict-theirs" onClick={() => {
+            const c = conflict; setConflict(undefined);
+            if (!c.cur) { nav(`/borehole/${encodeURIComponent(old!.borehole)}`, { replace: true }); return; }
+            rebase(c.cur);
+          }}>{conflict.st.kind === 'deleted' ? 'Leave it deleted' : 'Keep the newer values'}</button>
+        </div>
+      )}
+      <button type="submit" className="primary" data-testid="rd-save" disabled={saving || !!conflict}>Save reading</button>
       {old && <button type="button" className="danger" onClick={remove}>Delete reading</button>}
       {askCode && <UserCodeSheet onCancel={() => setAskCode(false)} onSave={(code) => { setSettings({ ...settings, userCode: code }); setAskCode(false); void commit(code); }} />}
     </form>

@@ -35,10 +35,19 @@ export interface TombRec {
   deletedAt: string;
   /** Borehole merged into another one with the same name (its readings moved there). */
   mergedInto?: string;
+  /** Set by the server when the delete was undone (an edit newer than the delete, or readings the deleting phone had not seen). */
+  restoredAt?: string;
 }
 export interface PushBatch { boreholes: BoreholeRec[]; readings: ReadingRec[]; tombstones: TombRec[] }
 /** acked: keys "b:uid", "r:uid", "t:uid" the server has stored (or deliberately ignored). Unacked items stay queued. */
-export interface PushResult { acked: string[] }
+export interface ItemNote { key: string; reason: string }
+export interface PushResult {
+  acked: string[];
+  /** Invalid items: never accepted as sent. Shown as "failed" with the reason; retry or discard. */
+  rejected?: ItemNote[];
+  /** Valid but not stored yet (e.g. its borehole is not on the sheet yet): stays waiting. */
+  held?: ItemNote[];
+}
 export interface PullResult { cursor: number; boreholes: BoreholeRec[]; readings: ReadingRec[]; tombstones: TombRec[] }
 export interface AdapterStatus { ok: boolean; message: string }
 

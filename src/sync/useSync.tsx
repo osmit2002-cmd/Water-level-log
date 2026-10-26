@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { QUEUED_EVENT, outboxCount, queueEverything, resetCursor } from '../lib/db';
+import { QUEUED_EVENT, outboxStats, type OutboxItem } from '../lib/db';
+import { prepareEnable } from './enable';
 import { useStore } from '../store';
 import { syncOnce } from './engine';
 import { SheetsAdapter, syncUrlError } from './sheets';
@@ -18,11 +19,17 @@ export function loadSyncConfig(): SyncConfig {
     return { enabled: !!j.enabled, url: typeof j.url === 'string' ? j.url : '', team: typeof j.team === 'string' ? j.team : '', lastSyncedAt: j.lastSyncedAt || undefined, lastError: j.lastError || undefined };
   } catch { return { enabled: false, url: '', team: '' }; }
 }
-export type SyncState = 'off' | 'syncing' | 'synced' | 'waiting' | 'offline' | 'error';
+export type SyncState = 'off' | 'syncing' | 'synced' | 'waiting' | 'failed' | 'offline' | 'error';
 
 interface SyncCtx {
   config: SyncConfig;
   pending: number;
+  /** Changes the sheet refused (with the reason). Kept until the user retries or discards them. */
+  failed: OutboxItem[];
+  /** Items the sheet accepted as valid but is holding (e.g. borehole not there yet), from the last sync. */
+  held: { key: string; reason: string }[];
+  /** Re-read the queue counts (after Retry/Discard). */
+  refresh: () => Promise<void>;
   state: SyncState;
   busy: boolean;
   /** Check the URL and code, then turn sync on (queues all local data) and sync. Returns an error message or ''. */
@@ -42,6 +49,8 @@ export function SyncProvider({ children }: { children: ReactNode }) {
   const [config, setConfigState] = useState<SyncConfig>(loadSyncConfig);
   const cfgRef = useRef(config);
   const [pending, setPending] = useState(0);
+  const [failed, setFailed] = useState<OutboxItem[]>([]);
+  const [held, setHeld] = useState<{ key: string; reason: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [online, setOnline] = useState(() => typeof navigator === 'undefined' || navigator.onLine !== false);
   const inFlight = useRef<Promise<void> | null>(null);
@@ -53,7 +62,9 @@ export function SyncProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(SYNC_KEY, JSON.stringify(n));
     setConfigState(n);
   }, []);
-  const refreshCount = useCallback(async () => { try { setPending(await outboxCount()); } catch { /* db not open */ } }, []);
+  const refreshCount = useCallback(async () => {
+    try { const s = await outboxStats(); setPending(s.waiting); setFailed(s.failed); } catch { /* db not open */ }
+  }, []);
 
   const run = useCallback(async (): Promise<void> => {
     const c = cfgRef.current;
@@ -66,6 +77,7 @@ export function SyncProvider({ children }: { children: ReactNode }) {
           again.current = false;
           const r = await syncOnce(makeAdapter(cfgRef.current.url, cfgRef.current.team));
           if (r.changed) await reload();
+          setHeld(r.held);
           setConfig({ lastSyncedAt: new Date().toISOString(), lastError: undefined });
         } while (again.current && cfgRef.current.enabled);
       } catch (e) {
@@ -117,10 +129,10 @@ export function SyncProvider({ children }: { children: ReactNode }) {
     const ue = syncUrlError(url);
     if (ue) return ue;
     if (!team) return 'Enter the team code';
-    const st = await makeAdapter(url, team).status();
+    const ad = makeAdapter(url, team);
+    const st = await ad.status();
     if (!st.ok) return st.message;
-    await queueEverything();
-    await resetCursor(); // this may be a different sheet than last time: pull everything
+    try { await prepareEnable(ad); } catch (e) { return (e as Error).message || String(e); }
     setConfig({ enabled: true, url, team, lastError: undefined });
     await run();
     return cfgRef.current.lastError ?? '';
@@ -128,18 +140,19 @@ export function SyncProvider({ children }: { children: ReactNode }) {
   const disable = useCallback(() => setConfig({ enabled: false, lastError: undefined }), [setConfig]);
   const syncNow = useCallback(() => run(), [run]);
 
-  const state: SyncState = !config.enabled ? 'off' : busy ? 'syncing' : !online ? 'offline' : config.lastError ? 'error' : pending ? 'waiting' : 'synced';
-  const value = useMemo(() => ({ config, pending, state, busy, enable, disable, syncNow }), [config, pending, state, busy, enable, disable, syncNow]);
+  const state: SyncState = !config.enabled ? 'off' : busy ? 'syncing' : !online ? 'offline' : config.lastError ? 'error' : failed.length ? 'failed' : pending ? 'waiting' : 'synced';
+  const value = useMemo(() => ({ config, pending, failed, held, refresh: refreshCount, state, busy, enable, disable, syncNow }), [config, pending, failed, held, refreshCount, state, busy, enable, disable, syncNow]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
 export function SyncBadge() {
-  const { state, pending, config } = useSync();
+  const { state, pending, failed, config } = useSync();
   if (state === 'off') return null;
-  const text = state === 'synced' ? 'All synced'
+  const text = state === 'failed' ? `${failed.length} failed${pending ? ` · ${pending} waiting` : ''}`
+    : state === 'synced' ? 'All synced'
     : state === 'syncing' ? (pending ? `Syncing ${pending}…` : 'Syncing…')
     : state === 'offline' ? (pending ? `Offline · ${pending} waiting` : 'Offline')
     : state === 'error' ? (pending ? `Sync error · ${pending} waiting` : 'Sync error')
     : `${pending} waiting`;
-  return <a href="#/settings" className={`sync-badge ${state}`} data-testid="sync-badge" data-state={state} title={state === 'error' ? config.lastError : undefined}>{text}</a>;
+  return <a href="#/settings" className={`sync-badge ${state}`} data-testid="sync-badge" data-state={state} title={state === 'error' ? config.lastError : state === 'failed' ? failed[0]?.failed : undefined}>{text}</a>;
 }

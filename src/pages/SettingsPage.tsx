@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { boreholesCsv, columnLabel, csvFilename, parseBoreholesCsv, readingsCsv } from '../lib/csv';
-import { findName, getNextReadingId, replaceAll, upsertBoreholes } from '../lib/db';
+import { discardFailed, findName, getDiscarded, getNextReadingId, outboxStats, replaceAll, retryFailed, upsertBoreholes, type OutboxItem } from '../lib/db';
 import { makeBackup, validateBackup } from '../lib/backup';
 import { saveFile } from '../lib/share';
 import { todayLocal } from '../lib/math';
@@ -36,6 +36,17 @@ export default function SettingsPage() {
       setSyncMsg(e ? { kind: 'error', text: e } : { kind: 'ok', text: 'Sync is on. This phone now shares readings with the team sheet.' });
     } finally { setChecking(false); }
   }
+  const describeItem = (f: OutboxItem) => {
+    const r = f.rec as { displayId?: string; name?: string; kind?: string };
+    return f.kind === 'reading' ? `Reading ${r.displayId}` : f.kind === 'borehole' ? `Borehole ${r.name}` : `Delete of a ${r.kind}`;
+  };
+  async function retryOne(key: string) { await retryFailed(key); await sync.refresh(); await sync.syncNow(); }
+  async function discardOne(f: OutboxItem) {
+    if (!confirm(`Discard this change: ${describeItem(f)}?\n\nIt will not be sent to the team sheet. The record stays on this phone as it is, and a copy of the change is kept in your backups.`)) return;
+    await discardFailed(f.key);
+    await sync.refresh();
+    setSyncMsg({ kind: 'ok', text: `Discarded: ${describeItem(f)}. A copy is kept in backups.` });
+  }
   function turnOff() {
     if (!confirm('Turn sync off on this phone? Your data stays on this phone. New changes wait here and are sent if you turn sync back on.')) return;
     sync.disable();
@@ -68,7 +79,8 @@ export default function SettingsPage() {
   }
   async function backup() {
     const next = await getNextReadingId();
-    const r = await saveFile(JSON.stringify(makeBackup(boreholes, readings, settings, next, `Water Level Log ${__APP_VERSION__}`), null, 1), `waterlevels_backup_${todayLocal()}.json`, 'application/json');
+    const unsynced = { failed: (await outboxStats()).failed, discarded: await getDiscarded() };
+    const r = await saveFile(JSON.stringify(makeBackup(boreholes, readings, settings, next, `Water Level Log ${__APP_VERSION__}`, unsynced), null, 1), `waterlevels_backup_${todayLocal()}.json`, 'application/json');
     done('Backup')(r);
   }
   const set = (p: Partial<Settings>) => setSettings({ ...settings, ...p });
@@ -101,11 +113,28 @@ export default function SettingsPage() {
           {sync.pending > 0 && <p className="muted small">{sync.pending} change(s) on this phone will be sent when sync is on.</p>}
         </>) : (<>
           <dl>
-            <dt>Status</dt><dd data-testid="sync-status">{sync.state === 'synced' ? 'All synced' : sync.state === 'syncing' ? 'Syncing…' : sync.state === 'offline' ? `Offline, ${sync.pending} waiting` : sync.state === 'error' ? `Error, ${sync.pending} waiting` : `${sync.pending} waiting`}</dd>
+            <dt>Status</dt><dd data-testid="sync-status">{sync.state === 'failed' ? `${sync.failed.length} failed${sync.pending ? `, ${sync.pending} waiting` : ''}` : sync.state === 'synced' ? 'All synced' : sync.state === 'syncing' ? 'Syncing…' : sync.state === 'offline' ? `Offline, ${sync.pending} waiting` : sync.state === 'error' ? `Error, ${sync.pending} waiting` : `${sync.pending} waiting`}</dd>
             <dt>Last synced</dt><dd data-testid="sync-last">{fmtTime(sync.config.lastSyncedAt)}</dd>
             <dt>Sheet</dt><dd className="small">{sync.config.url.replace(/^https:\/\//, '').slice(0, 60)}{sync.config.url.length > 68 ? '…' : ''}</dd>
           </dl>
           {sync.config.lastError && <p className="error" role="alert" data-testid="sync-error">{sync.config.lastError}</p>}
+          {sync.held.length > 0 && sync.pending > 0 && <p className="muted small" data-testid="sync-held">{sync.held.length} change(s) still waiting: {[...new Set(sync.held.map((h) => h.reason))].join('; ')}.</p>}
+          {sync.failed.length > 0 && (
+            <div className="error failed-list" role="alert" data-testid="sync-failed">
+              <p><strong>{sync.failed.length} change(s) failed.</strong> The team sheet refused them. They are still on this phone and are not sent again until you tap Retry.</p>
+              <ul>
+                {sync.failed.map((f) => (
+                  <li key={f.key} data-testid="failed-item">
+                    <span>{describeItem(f)}: <em data-testid="failed-reason">{f.failed}</em></span>
+                    <span className="row-btns">
+                      <button type="button" className="small" onClick={() => void retryOne(f.key)} data-testid="failed-retry">Retry</button>
+                      <button type="button" className="small danger" onClick={() => void discardOne(f)} data-testid="failed-discard">Discard</button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <button type="button" className="wide primary" disabled={sync.busy} onClick={() => void sync.syncNow()} data-testid="sync-now">{sync.busy ? 'Syncing…' : 'Sync now'}</button>
           <button type="button" className="wide" onClick={turnOff} data-testid="sync-off">Turn off sync</button>
         </>)}
