@@ -23,10 +23,10 @@ export default function App() {
           <Routes key={loc.pathname + loc.search}>
             <Route path="/" element={<BoreholeList />} />
             <Route path="/new-borehole" element={<BoreholeForm />} />
-            <Route path="/borehole/:id" element={<BoreholeDetail />} />
-            <Route path="/borehole/:id/edit" element={<BoreholeForm />} />
+            <Route path="/borehole/:name" element={<BoreholeDetail />} />
+            <Route path="/borehole/:name/edit" element={<BoreholeForm />} />
             <Route path="/reading/new" element={<ReadingForm />} />
-            <Route path="/reading/:uid" element={<ReadingForm />} />
+            <Route path="/reading/:id" element={<ReadingForm />} />
             <Route path="/readings" element={<ReadingsList />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<BoreholeList />} />
@@ -37,7 +37,7 @@ export default function App() {
         <NavLink to="/" end>Boreholes</NavLink>
         <NavLink to="/reading/new" data-testid="tab-add">+ Reading</NavLink>
         <NavLink to="/readings">Readings</NavLink>
-        <NavLink to="/settings">Data</NavLink>
+        <NavLink to="/settings" data-testid="tab-settings">Settings</NavLink>
       </nav>
     </div>
   );

@@ -21,7 +21,7 @@ export default function TrendChart({ readings, unit }: { readings: DerivedReadin
         <text x={L} y={H - 6}>{pts[0].r.datetime.slice(0, 10)}</text>
         <text x={W - R} y={H - 6} textAnchor="end">{pts[pts.length - 1].r.datetime.slice(0, 10)}</text>
         <path d={d} className="line" />
-        {pts.map((p) => <circle key={p.r.uid} cx={x(p.t)} cy={y(p.v)} r={3.5} className="dot"><title>{`${p.r.datetime.replace('T', ' ')}: ${fmt2(p.v)} ${unit}`}</title></circle>)}
+        {pts.map((p) => <circle key={p.r.id} cx={x(p.t)} cy={y(p.v)} r={3.5} className="dot"><title>{`${p.r.datetime.replace('T', ' ')}: ${fmt2(p.v)} ${unit}`}</title></circle>)}
       </svg>
       <figcaption className="muted small">Water elevation ({unit})</figcaption>
     </figure>

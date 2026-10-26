@@ -72,3 +72,12 @@ td a { display: inline-block; min-height: 32px; }
 .chart { margin: 12px 0; } .chart svg { width: 100%; height: auto; border: 2px solid var(--line); border-radius: 10px; background: var(--card); }
 .chart text { fill: var(--fg); font-size: 11px; } .chart .grid { stroke: var(--line); stroke-opacity: .35; }
 .chart .line { fill: none; stroke: var(--accent); stroke-width: 3; } .chart .dot { fill: var(--accent); }
+th { white-space: nowrap; font-size: 14px; }
+td { white-space: nowrap; }
+td.notes { min-width: 140px; white-space: normal; }
+.toggles { display: flex; flex-direction: column; gap: 0; border: 2px solid var(--line); border-radius: 12px; padding: 4px 12px; margin: 0; }
+.toggles legend { font-weight: 700; font-size: 16px; padding: 0 4px; }
+.toggle { display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; border-bottom: 1px solid var(--line); font-weight: 700; }
+.toggle:last-of-type { border-bottom: 0; }
+.toggle input { width: 30px; height: 30px; min-height: 0; flex: none; accent-color: var(--accent); }
+.stamp { border: 2px dashed var(--line); border-radius: 10px; padding: 10px 12px; }
