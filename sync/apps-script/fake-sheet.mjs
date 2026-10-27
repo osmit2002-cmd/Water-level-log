@@ -89,7 +89,7 @@ export function fakeEnv({ team = 'TEAM-123', clock, tables } = {}) {
   let t = Date.parse('2026-10-26T14:00:00Z');
   return {
     ss: new FakeSpreadsheet(),
-    props: { getProperty: (k) => store.get(k) ?? null, setProperty: (k, v) => { store.set(k, v); } },
+    props: { getProperty: (k) => store.get(k) ?? null, setProperty: (k, v) => { store.set(k, v); }, setProperties: (o) => { for (const k in o) store.set(k, o[k]); } },
     lock: { waitLock: () => { if (locked) throw new Error('busy'); locked = true; }, releaseLock: () => { locked = false; } },
     now: clock ?? (() => new Date(t += 1000).toISOString()),
     _store: store,

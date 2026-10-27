@@ -241,4 +241,25 @@ describe('0.6.0 review fixes (Code.gs)', () => {
     edit('r2', 'Date', '03/04/2026');
     expect(rec('r2').datetime.slice(0, 10)).toBe('2026-04-03');
   });
+  it('a copied row cannot bring back a reading a phone deleted; the copy is removed and the delete stands', () => {
+    three();
+    R().data.push([...R().data[rowOf('r2')]]);
+    pull();
+    expect(gs.maintenance_(env, false)).toMatch(/appears twice/);
+    push([], [], [{ kind: 'reading', uid: 'r2', deletedAt: T2 }]);
+    pull();
+    expect(rec('r2')).toBeUndefined();
+    expect(R().objects().filter((x) => x['Reading UID'] === 'r2').length).toBe(0);
+  });
+  it('set-up blanks the sync columns of a copied row, so hand deletes are not paused afterwards', () => {
+    three();
+    R().data.push([...R().data[rowOf('r2')]]);
+    env._store.set('LAYOUT', '0');
+    pull();
+    const copies = R().objects().filter((x) => String(x.Notes).startsWith('Copied row'));
+    expect(copies.length).toBe(1);
+    expect(copies[0]['Reading UID']).toBe('');
+    R().deleteRow(rowOf('r3') + 1);
+    expect(pull().tombstones.map((t: { uid: string }) => t.uid)).toContain('r3');
+  });
 });

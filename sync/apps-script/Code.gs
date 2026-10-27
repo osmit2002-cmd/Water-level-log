@@ -106,7 +106,7 @@ function maintenance_(env, relayout) {
     reconcile_(db, env);
     saveAll_(db, env);
     if (relayout) msg = migrate_(env);
-    return msg || 'Sheet edits applied.';
+    return (msg || 'Sheet edits applied.') + (env.notice ? ' ' + env.notice : '');
   } finally { env.lock.releaseLock(); }
 }
 function json_(o) {
@@ -209,15 +209,15 @@ function loadTable_(ss, name) {
   var idx = cols.map(function (c) { return head.indexOf(c[1]); });
   var missing = cols.filter(function (c, i) { return idx[i] < 0 && !OPTIONAL_[c[0]]; });
   if (missing.length) throw new Error('Sheet "' + name + '" is missing column ' + missing[0][1] + '. Do not rename or delete the header row.');
-  var last = sh.getLastRow(), rows = [], seen = {}, dups = 0;
+  var last = sh.getLastRow(), rows = [], seen = {}, dups = 0, dupUids = [];
   var vals = last > 1 ? sh.getRange(2, 1, last - 1, head.length).getValues() : [];
   for (var r = 0; r < vals.length; r++) {
     var o = {};
     for (var c = 0; c < cols.length; c++) o[cols[c][0]] = idx[c] < 0 ? '' : fromCell_(cols[c][0], vals[r][idx[c]]);
     // A copied row (same UID twice) is ignored: the first one is the reading.
-    if (o.uid && !seen[o.uid]) { seen[o.uid] = 1; o._row = r + 2; rows.push(o); } else if (o.uid) dups++;
+    if (o.uid && !seen[o.uid]) { seen[o.uid] = 1; o._row = r + 2; rows.push(o); } else if (o.uid) { dups++; if (dupUids.indexOf(o.uid) < 0) dupUids.push(o.uid); }
   }
-  return { sheet: sh, name: name, head: head, idx: idx, rows: rows, last: last, dups: dups, dirty: {}, cleared: [] };
+  return { sheet: sh, name: name, head: head, idx: idx, rows: rows, last: last, dups: dups, dupUids: dupUids, dirty: {}, cleared: [] };
 }
 /**
  * Write only the rows that changed (and append new ones); other rows, and columns that are not ours, are untouched.
@@ -619,6 +619,7 @@ function indexAfterSave_(db) {
   for (k in db.R.removed || {}) { delete L.map[k]; L.changed = true; }
   db.R.written = {}; db.R.removed = {};
 }
+var SYNC_ONLY_ = { uid: 1, boreholeUid: 1, seq: 1, rev: 1, createdAt: 1, updatedAt: 1 };
 function needsLayout_(env) { return Number(env.props.getProperty('LAYOUT') || 0) < LAYOUT_; }
 
 function reconcile_(db, env) {
@@ -628,7 +629,9 @@ function reconcile_(db, env) {
     var r = rows[i]; uid = r.uid; seen[uid] = 1;
     var prev = L.map[uid], gone = dead_(db, uid);
     if (prev === undefined) {
-      if (gone) { // deleted, and now the row is back (Edit > Undo or version history): undo the delete
+      // Deleted on a phone, yet a row with its UID is still here: a leftover copy of the row. The phone's delete stands.
+      if (gone && gone.source !== 'sheet') { clearRow_(db.R, db.r, uid); continue; }
+      if (gone) { // deleted by hand, and now the row is back (Edit > Undo or version history): undo the delete
         restoreTomb_(db, env, uid);
         var back = copy_(r); back.updatedAt = after_(gone.deletedAt, env);
         fixRow_(back); putR_(db, back);
@@ -640,7 +643,15 @@ function reconcile_(db, env) {
   }
   // A UID twice means rows were copied, or shifted under a write: a missing UID then may not be a real delete.
   // Deletes wait (the readings stay on the phones) until the duplicate is gone.
-  if (db.R.dups) return;
+  if (db.R.dups) {
+    for (i = 0; i < db.R.dupUids.length; i++) {
+      var cr = db.r[db.R.dupUids[i]], b = cr && db.b[cr.boreholeUid];
+      var note = 'Row copied (Reading ' + (cr ? cr.num : '?') + '): deleting rows by hand is paused until the copy is removed.';
+      if (b && b.flag !== note) flagB_(db, env, b.uid, note);
+    }
+    env.notice = 'A reading row appears twice (same Reading UID). Deleting rows by hand is paused until the copy is removed.';
+    return;
+  }
   for (uid in L.map) {
     if (seen[uid]) continue;
     delete L.map[uid]; L.changed = true;
@@ -747,7 +758,13 @@ function migrate_(env) {
     if (!/^\d+$/.test(raw)) { if (!o.oldId) o.oldId = raw; o.num = null; }
     var extra = foreign.map(function (cc) { return keepCell(row, fx[i], cc); });
     if (o.uid && !seen[o.uid]) { seen[o.uid] = 1; recs.push({ o: o, extra: extra }); }
-    else others.push({ ours: cols.map(function (x, j) { return idx[j] < 0 ? '' : keepCell(row, fx[i], idx[j]); }), extra: extra });
+    else {
+      // Not a reading (no UID, or a copy of one): kept for Odin, but its sync columns are blanked so it can never pass
+      // for the reading it was copied from.
+      var ours = cols.map(function (x, j) { return idx[j] < 0 || SYNC_ONLY_[x[0]] ? '' : keepCell(row, fx[i], idx[j]); });
+      if (o.uid) ours[colIndex_('Readings', 'notes')] = 'Copied row, not synced. ' + (o.notes || '');
+      others.push({ ours: ours, extra: extra });
+    }
   }
   // First run: number everything 1..N in date order. Once numbers have been handed out (NUM_MAX set), never renumber:
   // valid unique numbers stay, and only a missing/invalid/duplicate one gets the next number.
@@ -804,11 +821,11 @@ function migrate_(env) {
   for (i = 0; i < check.rows.length; i++) L.map[check.rows[i].uid] = snap_(check.rows[i]);
   L.changed = true;
   saveIndex_(ss, L);
-  env.props.setProperty('NUM_MAX', String(numMax));
-  if (rev > rev_(env)) env.props.setProperty('REV', String(rev));
-  env.props.setProperty('LAYOUT', String(LAYOUT_));
-  env.props.setProperty('MIGRATING', '');
-  return 'Readings table ready: ' + recs.length + ' readings' + (others.length ? ' (+' + others.length + ' rows without a Reading UID, kept at the bottom, not synced)' : '') +
+  // All at once, so a stop here can never leave "numbered" without "laid out" (or the reverse).
+  var fin = { NUM_MAX: String(numMax), LAYOUT: String(LAYOUT_), MIGRATING: '' };
+  if (rev > rev_(env)) fin.REV = String(rev);
+  if (env.props.setProperties) env.props.setProperties(fin); else for (var fk in fin) env.props.setProperty(fk, fin[fk]);
+  return 'Readings table ready: ' + recs.length + ' readings' + (others.length ? ' (+' + others.length + ' rows without a Reading UID or copied, kept at the bottom, not synced)' : '') +
     (backup ? '. Old tab kept as "' + backup + '"' : '') + '. Formatting: ' + how + '.';
 }
 /** Header, frozen row, hidden + warning-protected sync columns, and a real Table if the Sheets API service is on. */
