@@ -414,7 +414,7 @@ function flagB_(db, env, uid, text, at) {
   var b = db.b[uid];
   if (!b) return;
   var nb = copy_(b), when = at || env.now();
-  nb.flag = text; nb.flagAt = when; if (when > nb.updatedAt) nb.updatedAt = when;
+  nb.flag = text; nb.flagAt = when; (env.flagged = env.flagged || {})[uid] = 1; if (when > nb.updatedAt) nb.updatedAt = when;
   putB_(db, nb);
 }
 function liveClash_(db, name, notUid) {
@@ -623,6 +623,7 @@ var SYNC_ONLY_ = { uid: 1, boreholeUid: 1, seq: 1, rev: 1, createdAt: 1, updated
 function needsLayout_(env) { return Number(env.props.getProperty('LAYOUT') || 0) < LAYOUT_; }
 
 function reconcile_(db, env) {
+  env.flagged = {}; env.notice = '';
   var L = db.L, day = env.now().slice(0, 10), seen = {}, uid, i;
   var rows = db.R.rows.slice();
   for (i = 0; i < rows.length; i++) {
@@ -643,12 +644,20 @@ function reconcile_(db, env) {
   }
   // A UID twice means rows were copied, or shifted under a write: a missing UID then may not be a real delete.
   // Deletes wait (the readings stay on the phones) until the duplicate is gone.
+  // One note per borehole listing its copied readings; written only when the text changes, never over a note made
+  // earlier in this request, and cleared once the copies are gone.
+  var notes = {}, COPIED = 'Row copied (Reading ', bu;
+  for (i = 0; i < db.R.dupUids.length; i++) {
+    var cr = db.r[db.R.dupUids[i]];
+    if (cr) (notes[cr.boreholeUid] = notes[cr.boreholeUid] || []).push(cr.num);
+  }
+  for (bu in db.b) {
+    var b = db.b[bu], want = notes[bu] ? COPIED + notes[bu].sort(function (x, y) { return x - y; }).join(', ') + '): deleting rows by hand is paused until the copy is removed.' : '';
+    if (env.flagged && env.flagged[bu]) continue;
+    if (want && b.flag !== want) flagB_(db, env, bu, want);
+    else if (!want && String(b.flag || '').indexOf(COPIED) === 0) flagB_(db, env, bu, '');
+  }
   if (db.R.dups) {
-    for (i = 0; i < db.R.dupUids.length; i++) {
-      var cr = db.r[db.R.dupUids[i]], b = cr && db.b[cr.boreholeUid];
-      var note = 'Row copied (Reading ' + (cr ? cr.num : '?') + '): deleting rows by hand is paused until the copy is removed.';
-      if (b && b.flag !== note) flagB_(db, env, b.uid, note);
-    }
     env.notice = 'A reading row appears twice (same Reading UID). Deleting rows by hand is paused until the copy is removed.';
     return;
   }

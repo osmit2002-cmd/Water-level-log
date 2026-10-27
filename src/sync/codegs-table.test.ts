@@ -262,4 +262,17 @@ describe('0.6.0 review fixes (Code.gs)', () => {
     R().deleteRow(rowOf('r3') + 1);
     expect(pull().tombstones.map((t: { uid: string }) => t.uid)).toContain('r3');
   });
+  it('the copied-row note lists every copy once, stays put across syncs, and goes when the copies do', () => {
+    three();
+    R().data.push([...R().data[rowOf('r2')]], [...R().data[rowOf('r3')]]);
+    pull();
+    const b1 = () => pull().boreholes.find((b: BoreholeRec) => b.uid === 'b1');
+    expect(b1().flag).toMatch(/Reading 2, 3/);
+    const rev = env._store.get('REV');
+    pull(); pull();
+    expect(env._store.get('REV')).toBe(rev);
+    R().data.pop(); R().data.pop();
+    pull();
+    expect(b1().flag).toBe('');
+  });
 });

@@ -130,8 +130,8 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
       }
       changed++;
     }
-    // 0.6.0: a reading (Local, or Shared and still waiting for the sheet (provisional number) whose number the sheet just gave to
-    // another reading moves to the next free number here, so no two Shared readings show the same Reading ID.
+    // 0.6.0: a reading (Local, or Shared and still waiting for the sheet with a provisional number) whose number the sheet just gave to
+    // another reading moves to the next free number here, so no two readings on this phone show the same Reading ID.
     const sheetNums = new Map(p.readings.filter((x) => x.num).map((x) => [x.num!, x.uid]));
     if (sheetNums.size) {
       for (const o of await rs.getAll()) {
