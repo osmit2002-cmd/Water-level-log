@@ -573,7 +573,7 @@ export async function shareBorehole(name: string): Promise<number> {
  * syncing, so nothing is deleted anywhere and the next pull cannot bring a duplicate back. `hideShared` hides the shared
  * one on this phone only. Returns the new borehole's name and how many readings were copied.
  */
-export async function makeLocalCopy(name: string, newName: string, hideShared = false): Promise<{ name: string; readings: number }> {
+export async function makeLocalCopy(name: string, newName: string, hideShared = false, userCode?: string): Promise<{ name: string; readings: number }> {
   const tx = await rw(ALL);
   try {
     const bs = tx.objectStore('boreholes'), rs = tx.objectStore('readings'), meta = tx.objectStore('meta');
@@ -589,17 +589,15 @@ export async function makeLocalCopy(name: string, newName: string, hideShared = 
     await bs.put(copy);
     let id = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
     let n = 0;
-    // Copies get fresh Reading IDs (next number per User Code), so a copy never shows the same ID as its original.
-    const top = new Map<string, number>();
-    for (const o of await rs.getAll()) { const c = o.userCode ?? ''; top.set(c, Math.max(top.get(c) ?? 0, o.seq ?? o.id)); }
-    let nextSeq = ((await meta.get(NEXT_SEQ))?.value as number | undefined) ?? 0;
+    // Copies get fresh Reading IDs in this phone's own range (its User Code + NEXT_SEQ, as for a new reading), so they can never
+    // collide with a number another phone will use. The original ID and author are kept in the notes.
+    const code = userCode ?? '';
+    let nextSeq = ((await meta.get(NEXT_SEQ))?.value as number | undefined) ?? id;
+    for (const o of await rs.getAll()) if ((o.userCode ?? '') === code && (o.seq ?? o.id) >= nextSeq) nextSeq = (o.seq ?? o.id) + 1;
     for (const r of (await rs.index('byBorehole').getAll(name)).sort((x, y) => x.datetime.localeCompare(y.datetime) || x.id - y.id)) {
       while (await rs.getKey(id)) id++;
-      const c = r.userCode ?? '';
-      const seq = (top.get(c) ?? 0) + 1;
-      top.set(c, seq);
-      nextSeq = Math.max(nextSeq, seq + 1);
-      await rs.add({ ...r, id, uid: uuid(), borehole: nn, boreholeUid: copy.uid, seq });
+      const note = `Copy of ${displayId(r)}`;
+      await rs.add({ ...r, id, uid: uuid(), borehole: nn, boreholeUid: copy.uid, userCode: code, seq: nextSeq++, notes: r.notes ? `${note}. ${r.notes}` : note });
       id++; n++;
     }
     await meta.put({ key: NEXT_ID, value: id });

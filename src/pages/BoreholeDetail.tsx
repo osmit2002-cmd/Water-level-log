@@ -39,7 +39,7 @@ export default function BoreholeDetail() {
     if (!nn) return setErr('Copy name is required');
     if (bhMap.has(nn)) return setErr(`A borehole named "${nn}" already exists.`);
     setBusy(true);
-    try { await makeLocalCopy(name, nn, hide); await reload(); setDlg(''); nav(`/borehole/${encodeURIComponent(nn)}`); }
+    try { await makeLocalCopy(name, nn, hide, settings.userCode); await reload(); setDlg(''); nav(`/borehole/${encodeURIComponent(nn)}`); }
     catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
   const exportCsv = () => saveFile(readingsCsv(rows, u, settings.columns), csvFilename(name, todayLocal()), 'text/csv');
@@ -89,7 +89,7 @@ export default function BoreholeDetail() {
       {dlg === 'copy' && (
         <div className="confirm" role="dialog" aria-label="Make a local copy" data-testid="conv-copy-dlg">
           <p><b>Make a Local copy of {name}</b></p>
-          <p>Copies the borehole and its {rows.length} reading(s) into a new Local borehole on this phone. The Shared one stays on the team sheet and keeps syncing; nothing is deleted.</p>
+          <p>Copies the borehole and its {rows.length} reading(s) into a new Local borehole on this phone (new Reading IDs under your User Code; the original ID goes in the notes). The Shared one stays on the team sheet and keeps syncing; nothing is deleted.</p>
           <label>Copy name<input value={copyName} onChange={(e) => setCopyName(e.target.value)} data-testid="conv-copy-name" /></label>
           <label className="check"><input type="checkbox" checked={hide} onChange={(e) => setHide(e.target.checked)} data-testid="conv-copy-hide" /> Hide the Shared one on this phone</label>
           {err && <p className="error" role="alert" data-testid="conv-err">{err}</p>}

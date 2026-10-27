@@ -153,7 +153,7 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
           to = nxt;
         }
         const target = await byUid(tx, to);
-        if (target) { await absorb(tx, local, target); changed++; continue; }
+        if (target) { if (local.hidden && !target.hidden) await _putBorehole(tx, { ...target, hidden: true }); await absorb(tx, local, target); changed++; continue; }
       }
       if (local) {
         const left = await rs.index('byBorehole').getAll(local.name);

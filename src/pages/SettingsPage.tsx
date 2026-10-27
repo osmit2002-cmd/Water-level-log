@@ -73,7 +73,11 @@ export default function SettingsPage() {
     if (sync.config.enabled && r.fromVersion < 4) return setMsg({ kind: 'error', text: `This is an older (v${r.fromVersion}) backup without sync IDs. Restoring it while sync is on would add a second copy of every record to the team sheet. Turn off sync first, or restore a backup saved by 0.4.0 or later.` });
     const note = r.fromVersion === 1 ? `\n\nThis is an older (v1) backup. It will be converted: Reading IDs assigned by date/time${r.skipped ? `, ${r.skipped} Dry/No-reading entr${r.skipped === 1 ? 'y' : 'ies'} without a depth dropped` : ''}.` : '';
     const lost = boreholes.filter((x) => scopeOf(x) === 'local' && !b.boreholes.some((y) => y.uid === x.uid)).map((x) => x.name);
-    const localNote = lost.length ? `\n\n⚠ ${lost.length} Local borehole(s) exist only on this phone and are not in this backup: ${lost.slice(0, 5).join(', ')}${lost.length > 5 ? '…' : ''}. They and their readings will be lost.` : '';
+    const localNames = new Set(boreholes.filter((x) => scopeOf(x) === 'local').map((x) => x.name));
+    const inBackup = new Set(b.readings.map((x) => x.uid));
+    const newer = readings.filter((x) => localNames.has(x.borehole) && !inBackup.has(x.uid) && !lost.includes(x.borehole)).length;
+    const localNote = (lost.length ? `\n\n⚠ ${lost.length} Local borehole(s) exist only on this phone and are not in this backup: ${lost.slice(0, 5).join(', ')}${lost.length > 5 ? '…' : ''}. They and their readings will be lost.` : '')
+      + (newer ? `\n\n⚠ ${newer} newer reading(s) on Local boreholes are not in this backup and will be lost.` : '');
     if (!confirm(`Replace ALL data on this device (${boreholes.length} boreholes, ${readings.length} readings) with the backup from ${b.exportedAt.slice(0, 10) || 'unknown date'} (${b.boreholes.length} boreholes, ${b.readings.length} readings)?${note}${localNote}${sync.config.enabled ? '\n\nSync is on: the restored data will be sent to the team sheet. Nothing is deleted from the sheet, and data from other phones comes back on the next sync.' : ''}`)) return;
     await replaceAll(b.boreholes, b.readings, b.nextReadingId);
     // The User Code belongs to this phone, not the backup: keep the current one.

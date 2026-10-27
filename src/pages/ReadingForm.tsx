@@ -109,7 +109,9 @@ function Form({ old, rebase }: { old?: Reading; rebase: (r: Reading) => void }) 
         counts={old ? undefined : { local: boreholes.filter((x) => inScope(x, 'local')).length, shared: boreholes.filter((x) => inScope(x, 'shared')).length }} />
       <p className="muted small" data-testid="rd-scope-note">{scope === 'local' ? 'Local: saved on this phone only, never uploaded.' : 'Shared: uploaded to the team sheet when sync is on.'}</p>
       {!old && !choices.length ? (
-        <p className="empty" data-testid="rd-scope-empty">No {scope === 'local' ? 'Local' : 'Shared'} boreholes yet. <Link to={`/new-borehole?scope=${scope}`}>+ {scope === 'local' ? 'Local' : 'Shared'} borehole</Link></p>
+        boreholes.some((x) => x.hidden && scopeOf(x) === scope)
+          ? <p className="empty" data-testid="rd-scope-empty">All {scope === 'local' ? 'Local' : 'Shared'} boreholes are hidden on this phone. <Link to="/">Boreholes → Show hidden</Link></p>
+          : <p className="empty" data-testid="rd-scope-empty">No {scope === 'local' ? 'Local' : 'Shared'} boreholes yet. <Link to={`/new-borehole?scope=${scope}`}>+ {scope === 'local' ? 'Local' : 'Shared'} borehole</Link></p>
       ) : (
       <label>Borehole Name
         <select value={bh} onChange={(e) => setBh(e.target.value)} disabled={!!old} data-testid="rd-borehole">
