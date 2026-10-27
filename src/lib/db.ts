@@ -95,6 +95,10 @@ export function db() {
         let n = 0;
         for (const r of all) await rs.put({ ...r, num: ++n });
         await meta.put({ key: NUM_HWM, value: n });
+        // A 0.5.0 app may already have pulled the migrated sheet (and moved its cursor past it) without keeping the
+        // sheet's numbers. Pull everything again so every Shared reading gets the sheet's number.
+        await meta.put({ key: CURSOR, value: 0 });
+        await meta.put({ key: 'syncCursorHolds', value: 0 });
       }
      } catch (e) { try { tx.abort(); } catch { /* already aborted */ } throw e; }
     },

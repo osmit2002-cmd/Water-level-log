@@ -209,15 +209,15 @@ function loadTable_(ss, name) {
   var idx = cols.map(function (c) { return head.indexOf(c[1]); });
   var missing = cols.filter(function (c, i) { return idx[i] < 0 && !OPTIONAL_[c[0]]; });
   if (missing.length) throw new Error('Sheet "' + name + '" is missing column ' + missing[0][1] + '. Do not rename or delete the header row.');
-  var last = sh.getLastRow(), rows = [], seen = {};
+  var last = sh.getLastRow(), rows = [], seen = {}, dups = 0;
   var vals = last > 1 ? sh.getRange(2, 1, last - 1, head.length).getValues() : [];
   for (var r = 0; r < vals.length; r++) {
     var o = {};
     for (var c = 0; c < cols.length; c++) o[cols[c][0]] = idx[c] < 0 ? '' : fromCell_(cols[c][0], vals[r][idx[c]]);
     // A copied row (same UID twice) is ignored: the first one is the reading.
-    if (o.uid && !seen[o.uid]) { seen[o.uid] = 1; o._row = r + 2; rows.push(o); }
+    if (o.uid && !seen[o.uid]) { seen[o.uid] = 1; o._row = r + 2; rows.push(o); } else if (o.uid) dups++;
   }
-  return { sheet: sh, name: name, head: head, idx: idx, rows: rows, last: last, dirty: {}, cleared: [] };
+  return { sheet: sh, name: name, head: head, idx: idx, rows: rows, last: last, dups: dups, dirty: {}, cleared: [] };
 }
 /**
  * Write only the rows that changed (and append new ones); other rows, and columns that are not ours, are untouched.
@@ -538,8 +538,8 @@ function push_(db, req, env) {
       // sheet restores keeps the number the phone knew if it is free.
       // A phone's provisional number above every number ever handed out is kept (so the first phone to sync, and a phone
       // nobody raced, keeps the numbers it shows); anything else gets the next number.
-      if (restored && r.num > 0 && !numUsed_(db, r.num)) row.num = r.num;
-      else if (r.num > db.numMax && r.num <= db.numMax + 100000) row.num = db.numMax = r.num;
+      // (A restored reading always gets a new number: its old one may have been someone else's deleted number.)
+      if (!restored && r.num > db.numMax && r.num <= db.numMax + rds.length) row.num = db.numMax = r.num;
       else row.num = ++db.numMax;
       putR_(db, row);
     }
@@ -579,7 +579,6 @@ function pull_(db, since) {
   };
 }
 
-function numUsed_(db, n) { for (var i = 0; i < db.R.rows.length; i++) if (db.R.rows[i].num === n) return true; return false; }
 
 // ---------------- 0.6.0: hand edits and deletes in the sheet ----------------
 /**
@@ -590,7 +589,7 @@ function numUsed_(db, n) { for (var i = 0; i < db.R.rows.length; i++) if (db.R.r
  * - a row back after its delete (undo / version history) => the delete is undone.
  */
 function snap_(o) {
-  return JSON.stringify(SNAP_.map(function (k) { var v = o[k]; return v === undefined || v === null ? '' : typeof v === 'number' && !isFinite(v) ? 'NaN' : v; }));
+  return JSON.stringify(SNAP_.map(function (k) { var v = o[k]; return v === undefined || v === null ? '' : typeof v === 'number' ? (isFinite(v) ? Math.round(v * 1e6) / 1e6 : 'NaN') : v; }));
 }
 function loadIndex_(ss) {
   var sh = ss.getSheetByName(INDEX_), map = {};
@@ -639,18 +638,32 @@ function reconcile_(db, env) {
     if (gone) { clearRow_(db.R, db.r, uid); continue; } // a delete cut off by a time-out: finish it
     if (prev !== snap_(r)) handEdit_(db, env, r, JSON.parse(prev), day);
   }
+  // A UID twice means rows were copied, or shifted under a write: a missing UID then may not be a real delete.
+  // Deletes wait (the readings stay on the phones) until the duplicate is gone.
+  if (db.R.dups) return;
   for (uid in L.map) {
     if (seen[uid]) continue;
     delete L.map[uid]; L.changed = true;
     if (!dead_(db, uid)) addTomb_(db, env, { kind: 'reading', uid: uid, deletedAt: env.now(), source: 'sheet' });
   }
 }
+function dayFirst_(env) {
+  if (env.dayFirst === undefined) {
+    var loc = '';
+    try { loc = env.ss.getSpreadsheetLocale ? String(env.ss.getSpreadsheetLocale()) : ''; } catch (err) { loc = ''; }
+    env.dayFirst = !!loc && !/^(en_US|en_PH|es_US|en_CA|fil)/i.test(loc);
+  }
+  return env.dayFirst;
+}
 function round6_(x) { return Math.round(x * 1e6) / 1e6; }
 function fixRow_(n) { n.waterElevationFt = round6_(n.refElevationFt - n.depthFt); }
 function okNum_(v) { return typeof v === 'number' && isFinite(v); }
-function normDate_(v) {
+/** YYYY-MM-DD, or a/b/YYYY read in the spreadsheet's own order (month first only for US-style locales). */
+function normDate_(v, dayFirst) {
   var s = String(v).trim(), m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s), y, mo, d;
-  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; } else if ((m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s))) { y = +m[3]; mo = +m[1]; d = +m[2]; } else return '';
+  if (m) { y = +m[1]; mo = +m[2]; d = +m[3]; }
+  else if ((m = /^(\d{1,2})[\/.](\d{1,2})[\/.](\d{4})$/.exec(s))) { y = +m[3]; mo = dayFirst ? +m[2] : +m[1]; d = dayFirst ? +m[1] : +m[2]; }
+  else return '';
   var t = new Date(Date.UTC(y, mo - 1, d));
   if (t.getUTCFullYear() !== y || t.getUTCMonth() !== mo - 1 || t.getUTCDate() !== d) return '';
   return t.toISOString().slice(0, 10);
@@ -668,7 +681,7 @@ function handEdit_(db, env, r, prevArr, day) {
   var p = {}, i, k;
   for (i = 0; i < SNAP_.length; i++) p[SNAP_[i]] = prevArr[i];
   var n = copy_(r), bad = [];
-  var was = function (key) { var v = r[key]; v = v === undefined || v === null ? '' : typeof v === 'number' && !isFinite(v) ? 'NaN' : v; return JSON.stringify(v) !== JSON.stringify(p[key]); };
+  var was = function (key) { var v = r[key]; v = v === undefined || v === null ? '' : typeof v === 'number' ? (isFinite(v) ? Math.round(v * 1e6) / 1e6 : 'NaN') : v; return JSON.stringify(v) !== JSON.stringify(p[key]); };
   var back = function (key, why) { n[key] = p[key] === '' && NUMERIC_[key] ? null : p[key]; if (why) bad.push(why); };
   for (i = 0; i < SERVER_OWNED_.length; i++) {
     k = SERVER_OWNED_[i];
@@ -679,7 +692,7 @@ function handEdit_(db, env, r, prevArr, day) {
     if (to) { n.boreholeUid = to.uid; n.boreholeName = to.name; } // moved to another borehole
     else back('boreholeName', 'Borehole Name (there is no borehole called "' + r.boreholeName + '")');
   }
-  if (was('date')) { var d = normDate_(r.date); if (d) n.date = d; else back('date', 'Date (use YYYY-MM-DD)'); }
+  if (was('date')) { var d = normDate_(r.date, dayFirst_(env)); if (d) n.date = d; else back('date', 'Date (use YYYY-MM-DD)'); }
   if (was('time')) { var tm = normTime_(r.time); if (tm) n.time = tm; else back('time', 'Time (use HH:MM)'); }
   if (was('referencePoint')) n.referencePoint = String(r.referencePoint);
   if (was('notes')) n.notes = String(r.notes);
@@ -709,13 +722,18 @@ function migrate_(env) {
   var ss = env.ss, cols = COLS_.Readings, i, c;
   var sh = ss.getSheetByName('Readings');
   if (!sh || sh.getLastRow() < 1) sh = sheetFor_(ss, 'Readings');
-  var lastCol = sh.getLastColumn(), last = sh.getLastRow();
-  var head = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
+  // Crash safety: the live tab is cleared only after its copy exists and MIGRATING names that copy. If a run stops
+  // half-way (time-out, quota), the next run reads from the copy again, never from the half-written tab.
+  var pending = env.props.getProperty('MIGRATING') || '', src = pending ? ss.getSheetByName(pending) : null;
+  if (!src) { src = sh; pending = ''; }
+  var liveLastRow = sh.getLastRow(), liveLastCol = sh.getLastColumn();
+  var lastCol = src.getLastColumn(), last = src.getLastRow();
+  var head = src.getRange(1, 1, 1, lastCol).getValues()[0].map(String);
   var idx = cols.map(function (x) { return head.indexOf(x[1]); });
   var missing = cols.filter(function (x, j) { return idx[j] < 0 && !OPTIONAL_[x[0]]; });
   if (missing.length) throw new Error('Sheet "Readings" is missing column ' + missing[0][1] + '. Do not rename or delete the header row.');
-  var data = last > 1 ? sh.getRange(2, 1, last - 1, lastCol).getValues() : [];
-  var fx = last > 1 ? sh.getRange(2, 1, last - 1, lastCol).getFormulas() : [];
+  var data = last > 1 ? src.getRange(2, 1, last - 1, lastCol).getValues() : [];
+  var fx = last > 1 ? src.getRange(2, 1, last - 1, lastCol).getFormulas() : [];
   var foreign = [];
   for (c = 0; c < lastCol; c++) if (idx.indexOf(c) < 0) foreign.push(c);
   var keepCell = function (row, f, cc) { return f[cc] ? f[cc] : typeof row[cc] === 'string' ? guard_(row[cc]) : row[cc]; };
@@ -731,37 +749,47 @@ function migrate_(env) {
     if (o.uid && !seen[o.uid]) { seen[o.uid] = 1; recs.push({ o: o, extra: extra }); }
     else others.push({ ours: cols.map(function (x, j) { return idx[j] < 0 ? '' : keepCell(row, fx[i], idx[j]); }), extra: extra });
   }
-  // Keep existing numbers if they are all valid and unique (re-run); otherwise number everything in date order.
-  var nums = {}, keep = recs.length > 0;
-  for (i = 0; i < recs.length && keep; i++) { var nn = recs[i].o.num; if (!(nn > 0) || Math.floor(nn) !== nn || nums[nn]) keep = false; else nums[nn] = 1; }
+  // First run: number everything 1..N in date order. Once numbers have been handed out (NUM_MAX set), never renumber:
+  // valid unique numbers stay, and only a missing/invalid/duplicate one gets the next number.
+  var numMax = Number(env.props.getProperty('NUM_MAX') || 0), settled = numMax > 0;
   var key = function (x) { return [x.o.date, x.o.time, x.o.createdAt, x.o.uid].join('\u0001'); };
-  recs.sort(function (a, b) { return keep ? a.o.num - b.o.num : key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0; });
+  var byDate = function (a, b) { return key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0; };
+  var nums = {}, ok = function (n) { return n > 0 && Math.floor(n) === n; };
+  recs.sort(byDate);
+  for (i = 0; i < recs.length; i++) {
+    var nn = recs[i].o.num;
+    if (settled && ok(nn) && !nums[nn]) { nums[nn] = 1; if (nn > numMax) numMax = nn; } else recs[i].o.num = null;
+  }
   var rev = rev_(env);
   for (i = 0; i < recs.length; i++) if (Number(recs[i].o.rev) > rev) rev = Number(recs[i].o.rev);
   if (recs.length) rev++;
-  var numMax = Number(env.props.getProperty('NUM_MAX') || 0);
   for (i = 0; i < recs.length; i++) {
     var ro = recs[i].o;
-    if (!keep) ro.num = i + 1;
-    if (ro.num > numMax) numMax = ro.num;
+    if (!ro.num) ro.num = ++numMax;
     ro.rev = rev;
   }
+  recs.sort(function (a, b) { return a.o.num - b.o.num; });
   var out = [cols.map(function (x) { return x[1]; }).concat(foreign.map(function (cc) { return head[cc]; }))];
   for (i = 0; i < recs.length; i++) out.push(cols.map(function (x) { return toCell_(x[0], recs[i].o[x[0]]); }).concat(recs[i].extra));
   for (i = 0; i < others.length; i++) out.push(others[i].ours.concat(others[i].extra));
   var width = out[0].length;
 
   var stamp = env.now().slice(0, 16).replace('T', ' ').replace(':', '.');
-  var backup = '';
-  if (last > 1) {
+  var backup = pending;
+  if (!pending && last > 1) {
     backup = 'Readings before 0.6.0 ' + stamp;
     var bk = sh.copyTo(ss);
     bk.setName(ss.getSheetByName(backup) ? backup + ' (' + Math.random().toString(36).slice(2, 6) + ')' : backup);
     backup = bk.getName();
+    env.props.setProperty('MIGRATING', backup);
   }
-  sh.getRange(1, 1, Math.max(last, 1), Math.max(lastCol, 1)).clearContent();
+  sh.getRange(1, 1, Math.max(liveLastRow, 1), Math.max(liveLastCol, 1)).clearContent();
   if (sh.getMaxRows() < out.length + 1) sh.insertRowsAfter(sh.getMaxRows(), out.length + 1 - sh.getMaxRows() + 100);
-  for (c = 0; c < cols.length; c++) if (!NUMERIC_[cols[c][0]] || cols[c][0] === 'num') sh.getRange(1, c + 1, sh.getMaxRows(), 1).setNumberFormat(NUMERIC_[cols[c][0]] ? '0' : '@');
+  // Whole numbers for Reading ID / Seq / Rev, decimals for feet, plain text for the rest (so 0.5.0 text formats go).
+  for (c = 0; c < cols.length; c++) {
+    var k0 = cols[c][0];
+    sh.getRange(1, c + 1, sh.getMaxRows(), 1).setNumberFormat(!NUMERIC_[k0] ? '@' : k0 === 'num' || k0 === 'seq' || k0 === 'rev' ? '0' : '0.00####');
+  }
   sh.getRange(1, 1, out.length, width).setValues(out);
 
   // Check: every reading is still there, with the same values.
@@ -779,6 +807,7 @@ function migrate_(env) {
   env.props.setProperty('NUM_MAX', String(numMax));
   if (rev > rev_(env)) env.props.setProperty('REV', String(rev));
   env.props.setProperty('LAYOUT', String(LAYOUT_));
+  env.props.setProperty('MIGRATING', '');
   return 'Readings table ready: ' + recs.length + ' readings' + (others.length ? ' (+' + others.length + ' rows without a Reading UID, kept at the bottom, not synced)' : '') +
     (backup ? '. Old tab kept as "' + backup + '"' : '') + '. Formatting: ' + how + '.';
 }

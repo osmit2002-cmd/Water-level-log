@@ -88,7 +88,8 @@ No setup change since 0.4.2: Code.gs is unchanged, only the app changed. A Sheet
 - **Your edits reach the phones.** At every phone sync (or **Water Level Log → Apply my sheet edits now**):
   - **Delete a row** (right-click the row number → *Delete row*): the reading is removed from every phone, for good. A phone that still had an edit queued for it does not bring it back. Readings a phone keeps as **Local** are never touched.
   - **Change a value** (Date, Time, Depth, Water Elevation, Notes, User Code, Reference Point/Elevation, or Borehole Name to move it to another borehole): the phones get it. If only Water Elevation is changed, the depth is worked out from it. An invalid value (e.g. a depth that isn't a number, a borehole name that doesn't exist) is put back and the borehole gets a ⚑ note explaining why.
-  - **Undo** (Edit → Undo, or Version history) of a delete brings the reading back on the phones.
+  - **Undo** (Edit → Undo) of a delete brings the reading back on the phones, with a new Reading ID. Prefer Edit → Undo over
+    Version history: restoring an old version also rolls back readings that phones sent since then.
   - If a phone edits the same reading later than you, the later edit wins (depth and notes). Date, time and reference values can only be changed in the Sheet.
 - Don't edit the **Reading ID** or the hidden columns, and don't add readings as new rows by hand (rows without a Reading UID are ignored; add readings in the app).
 
@@ -99,3 +100,12 @@ No setup change since 0.4.2: Code.gs is unchanged, only the app changed. A Sheet
    - It copies the old tab to **Readings before 0.6.0 (date)** first; nothing is deleted. Check the new Readings tab, then you may delete that copy.
 4. **Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy.** Do **not** make a new deployment, or the URL changes.
 5. On each phone: update the app (open it while online and reload once), then **Settings → Sync now**. The Reading IDs switch to numbers.
+
+### 0.6.0 limits worth knowing
+- The columns move (readable columns first). Formulas or charts in other tabs that point at old column letters must be fixed by hand.
+- A row copied with the same Reading UID pauses hand deletes until the copy is removed (so a sort or paste can never delete readings by accident).
+- The time of a hand edit is when the script next sees it (the next phone sync or "Apply my sheet edits now"), not when it was typed.
+  A phone edit made in between can win over it.
+- Dates typed as 3/4/2026 are read in the spreadsheet's own order (File → Settings → Locale). YYYY-MM-DD is always safe.
+- Rows typed in by hand (no Reading UID) are not readings; add readings on a phone.
+- Update every phone to 0.6.0 soon after the script: a 0.5.0 phone still syncs, but shows old-style IDs until updated.

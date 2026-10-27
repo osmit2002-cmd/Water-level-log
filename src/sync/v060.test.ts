@@ -4,6 +4,7 @@ import { openDB } from 'idb';
 import { describe, expect, it } from 'vitest';
 import * as db from '../lib/db';
 import { syncOnce } from './engine';
+import { applyPull } from './apply';
 import { displayId } from '../lib/ids';
 import { fakeEnv, loadCodeGs, type FakeEnv } from '../../sync/apps-script/fake-sheet.mjs';
 import type { AdapterStatus, PullResult, PushBatch, PushResult, SyncAdapter } from './types';
@@ -50,9 +51,11 @@ describe('0.6.0 phone database upgrade (v3 -> v4)', () => {
     await old.put('readings', { id: 1, uid: 'u1', boreholeUid: 'b1', seq: 1, ...rd('MW-1', 10, '2026-10-20T08:00') });
     await old.put('readings', { id: 2, uid: 'u2', boreholeUid: 'b1', seq: 2, ...rd('MW-1', 11, '2026-10-18T08:00') });
     await old.put('readings', { id: 3, uid: 'u3', boreholeUid: 'b1', seq: 3, ...rd('MW-1', 12, '2026-10-19T08:00') });
+    await old.put('meta', { key: db.CURSOR, value: 42 }); // a 0.5.0 phone that already pulled the migrated sheet
     old.close();
     await on(p, async () => {
       const all = await db.allReadings();
+      expect((await (await db.db()).get('meta', db.CURSOR))?.value).toBe(0); // re-pulls everything to get the sheet's numbers
       expect(all.map((r) => [r.uid, r.num, r.seq, r.depthFt]).sort()).toEqual([['u1', 3, 1, 10], ['u2', 1, 2, 11], ['u3', 2, 3, 12]]);
       await db.saveBorehole(bh('MW-2'));
       await db.addReading(rd('MW-2', 1));
@@ -152,5 +155,22 @@ describe('0.6.0 sheet edits and deletes reach phones', () => {
     R(env).data[rowOf(env, uid)][col(env, 'Depth to Top of Water (ft)')] = 14;
     await on(A, async () => { await syncOnce(s); await syncOnce(s); expect((await db.allReadings()).find((x) => x.uid === uid)!.depthFt).toBe(14); });
     expect(R(env).objects().find((o) => o['Reading UID'] === uid)!['Depth to Top of Water (ft)']).toBe(14);
+  });
+});
+
+describe('0.6.0 held push clash', () => {
+  it('a reading still waiting to upload whose number the sheet gave to another reading is renumbered on the phone', async () => {
+    const env = fakeEnv(), s = new CodeGsAdapter(env);
+    const A = phone(), B = phone();
+    await on(A, async () => { await db.saveBorehole(bh('MW-1')); await syncOnce(s); });
+    await on(B, async () => { await syncOnce(s); await db.addReading(rd('MW-1', 20)); expect(await ids()).toEqual(['1']); });
+    await on(A, async () => { await db.addReading(rd('MW-1', 10)); await syncOnce(s); });
+    // B only pulls (its push is held back): the sheet's reading 1 arrives; B's own one moves off 1 at once.
+    await on(B, async () => {
+      await applyPull(await s.pull(0));
+      const all = await db.allReadings();
+      expect(all.map((r) => r.num).sort()).toEqual([1, 2]);
+      expect(all.find((r) => r.depthFt === 20)!.num).toBe(2);
+    });
   });
 });

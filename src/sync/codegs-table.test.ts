@@ -197,3 +197,48 @@ describe('0.6.0 rows edited by hand', () => {
     expect(R().objects().map((o) => o.Notes)).toEqual(['', '', '']);
   });
 });
+
+describe('0.6.0 review fixes (Code.gs)', () => {
+  const nums = () => R().objects().filter((x) => x['Reading UID']).map((x) => [x['Reading UID'], x['Reading ID']]);
+  it('a set-up run that stopped half-way is redone from the backup tab, not from the half-written tab', () => {
+    three();
+    const full = R().data.map((r: unknown[]) => [...r]);
+    const bk = env.ss.insertSheet('Readings before 0.6.0 (crash)');
+    bk.getRange(1, 1, full.length, full[0].length).setValues(full);
+    R().data.splice(2); // the run died after writing one row
+    env._store.set('MIGRATING', 'Readings before 0.6.0 (crash)');
+    gs.maintenance_(env, true);
+    expect(nums()).toEqual([['r1', 1], ['r2', 2], ['r3', 3]]);
+    expect(env._store.get('MIGRATING')).toBe('');
+  });
+  it('re-running set-up never renumbers, even with gaps from deleted rows', () => {
+    three();
+    R().deleteRow(rowOf('r1') + 1);
+    pull();
+    gs.maintenance_(env, true);
+    expect(nums()).toEqual([['r2', 2], ['r3', 3]]);
+    push([], [rd({ uid: 'r9' })]);
+    expect(rec('r9').num).toBe(4);
+  });
+  it('a copied row (same UID twice) holds back deletes until the copy is gone', () => {
+    three();
+    const copy = [...R().data[rowOf('r2')]];
+    R().deleteRow(rowOf('r3') + 1);
+    R().data.push(copy);
+    pull();
+    expect(pull().tombstones.map((t: { uid: string }) => t.uid)).not.toContain('r3');
+    R().data.pop();
+    expect(pull().tombstones.map((t: { uid: string }) => t.uid)).toContain('r3');
+  });
+  it('a restored row (Undo) never takes a number back from the sequence holes; a phone guess beyond the batch is ignored', () => {
+    three();
+    push([], [rd({ uid: 'r4', num: 50 } as Partial<ReadingRec>)]);
+    expect(rec('r4').num).toBe(4);
+  });
+  it('dates typed as d/m/yyyy are read day-first in a non-US spreadsheet', () => {
+    three();
+    (env.ss as unknown as { getSpreadsheetLocale: () => string }).getSpreadsheetLocale = () => 'en_GB';
+    edit('r2', 'Date', '03/04/2026');
+    expect(rec('r2').datetime.slice(0, 10)).toBe('2026-04-03');
+  });
+});

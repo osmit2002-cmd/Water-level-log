@@ -1,4 +1,4 @@
-import { _putBorehole, _queue, _rw, _tombstone, CURSOR, seeNum, findName, fromBRec, localCopyName, toBRec, toRRec, type Tx } from '../lib/db';
+import { _putBorehole, _queue, _rw, _tombstone, CURSOR, seeNum, takeNum, findName, fromBRec, localCopyName, toBRec, toRRec, type Tx } from '../lib/db';
 import { scopeOf } from '../lib/types';
 import type { Borehole, Reading } from '../lib/types';
 import { mergeBorehole, mergeFlag, mergeReading } from './merge';
@@ -129,6 +129,17 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
         await meta.put({ key: 'nextReadingId', value: id + 1 });
       }
       changed++;
+    }
+    // 0.6.0: a Shared reading still waiting for the sheet (provisional number) whose number the sheet just gave to
+    // another reading moves to the next free number here, so no two Shared readings show the same Reading ID.
+    const sheetNums = new Map(p.readings.filter((x) => x.num).map((x) => [x.num!, x.uid]));
+    if (sheetNums.size) {
+      for (const o of await rs.getAll()) {
+        const owner = o.num ? sheetNums.get(o.num) : undefined;
+        if (!owner || owner === o.uid || scopeOf(await byUid(tx, o.boreholeUid ?? '')) === 'local') continue;
+        await rs.put({ ...o, num: await takeNum(tx) });
+        changed++;
+      }
     }
 
     const order = [...incomingDead.values()].sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'reading' ? -1 : 1));

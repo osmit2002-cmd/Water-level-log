@@ -8,7 +8,8 @@ import { displayId } from './lib/ids';
 const COLORS = ['#0072B2', '#D55E00', '#009E73', '#CC79A7', '#E69F00', '#56B4E9', '#7F3C8D', '#999933'];
 const DASH = ['', '6 4', '2 3', '10 3 2 3'];
 const MEASURE_KEY = 'wl.chartMeasure';
-const fmtDay = (t: number) => { const d = new Date(t); return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`; };
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const fmtDay = (t: number) => { const d = new Date(t); return `${MON[d.getUTCMonth()]} ${d.getUTCDate()}`; };
 const fmtYear = (t: number) => String(new Date(t).getUTCFullYear());
 
 /**
@@ -23,7 +24,7 @@ export default function ReadingsChart({ rows, unit, from, to }: { rows: DerivedR
   const n = series.reduce((k, s) => k + s.pts.length, 0);
   const title = measure === 'elevation' ? `Water elevation (${unit})` : `Depth to water (${unit})`;
   const dir = measure === 'elevation' ? '↑ higher = water higher' : '↓ deeper = water lower';
-  const W = 360, H = 230, L = 50, R = 12, T = 14, B = 34;
+  const W = 360, H = 236, L = 54, R = 12, T = 14, B = 34;
   let body = null;
   if (span && n) {
     const vs = series.flatMap((s) => s.pts.map((p) => p.v));
@@ -41,8 +42,8 @@ export default function ReadingsChart({ rows, unit, from, to }: { rows: DerivedR
         {ticks.map((v) => <g key={v}><line x1={L} x2={W - R} y1={y(v)} y2={y(v)} className="grid" /><text x={L - 5} y={y(v) + 4} textAnchor="end">{fmt2(v)}</text></g>)}
         {xt.map((t, i) => <g key={t}>
           <line x1={x(t)} x2={x(t)} y1={T} y2={H - B} className="grid" />
-          <text x={x(t)} y={H - B + 15} textAnchor={i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle'}>{fmtDay(t)}</text>
-          {(multiYear || i === 0) && <text x={x(t)} y={H - B + 28} className="sub" textAnchor={i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle'}>{fmtYear(t)}</text>}
+          <text x={x(t)} y={H - B + 16} textAnchor={i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle'}>{fmtDay(t)}</text>
+          {(multiYear || i === 0) && <text x={x(t)} y={H - B + 31} className="sub" textAnchor={i === 0 ? 'start' : i === xt.length - 1 ? 'end' : 'middle'}>{fmtYear(t)}</text>}
         </g>)}
         {series.map((s, i) => {
           const c = COLORS[i % COLORS.length], dash = DASH[Math.floor(i / COLORS.length) % DASH.length];

@@ -82,7 +82,7 @@ table { border-collapse: collapse; width: 100%; font-size: 16px; }
 th, td { border-bottom: 1px solid var(--line); padding: 10px 6px; text-align: left; vertical-align: top; }
 td a { display: inline-block; min-height: 32px; }
 .chart { margin: 12px 0; } .chart svg { width: 100%; height: auto; border: 2px solid var(--line); border-radius: 10px; background: var(--card); }
-.chart text { fill: var(--fg); font-size: 11px; } .chart .grid { stroke: var(--line); stroke-opacity: .35; }
+.chart text { fill: var(--fg); font-size: 13px; } .chart .grid { stroke: var(--line); stroke-opacity: .35; }
 .chart .line { fill: none; stroke: var(--accent); stroke-width: 3; } .chart .dot { fill: var(--accent); }
 th { white-space: nowrap; font-size: 14px; }
 td { white-space: nowrap; }
@@ -129,7 +129,7 @@ label.check input { width: 26px; height: 26px; min-height: 0; flex: none; margin
 .seg.small-seg button { min-height: 40px; font-size: 15px; }
 .chart .axis-label { margin: 4px 0; font-weight: 700; font-size: 15px; }
 .chart .axis-label .muted { font-weight: 400; }
-.chart text.sub { font-size: 10px; opacity: .75; }
+.chart text.sub { font-size: 12px; opacity: .8; }
 .legend { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 15px; }
 .legend li { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .legend svg { flex: none; width: 26px; height: 10px; border: 0; border-radius: 0; padding: 0; margin: 0; background: none; }
