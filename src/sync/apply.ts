@@ -78,6 +78,7 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
         // Another borehole here has the same name: the server's record wins the uid, ours folds into it.
         const m2 = fromBRec(mergeBorehole(toBRec(merged), toBRec(clash)));
         const flagged: Borehole = { ...m2, uid: inc.uid, flag: m2.flag || mergeFlag(new Date().toISOString()), fieldTimes: { ...m2.fieldTimes, flag: new Date().toISOString() } };
+        if (clash.hidden || local?.hidden) flagged.hidden = true; // hiding is this phone's choice; a merge keeps it
         if (local && local.name !== clash.name) await bs.delete(local.name);
         await _putBorehole(tx, flagged);
         await absorb(tx, clash, flagged);

@@ -6,7 +6,7 @@ import { makeBackup, validateBackup } from '../lib/backup';
 import { saveFile } from '../lib/share';
 import { todayLocal } from '../lib/math';
 import { useSync } from '../sync/useSync';
-import { COLUMNS, USER_CODE_MAX, normalizeUserCode, userCodeError, type ColumnKey, type Settings } from '../lib/types';
+import { COLUMNS, USER_CODE_MAX, normalizeUserCode, userCodeError, scopeOf, type ColumnKey, type Settings } from '../lib/types';
 
 export default function SettingsPage() {
   const { boreholes, bhMap, readings, derived, settings, setSettings, reload, persisted } = useStore();
@@ -72,7 +72,9 @@ export default function SettingsPage() {
     const b = r.backup;
     if (sync.config.enabled && r.fromVersion < 4) return setMsg({ kind: 'error', text: `This is an older (v${r.fromVersion}) backup without sync IDs. Restoring it while sync is on would add a second copy of every record to the team sheet. Turn off sync first, or restore a backup saved by 0.4.0 or later.` });
     const note = r.fromVersion === 1 ? `\n\nThis is an older (v1) backup. It will be converted: Reading IDs assigned by date/time${r.skipped ? `, ${r.skipped} Dry/No-reading entr${r.skipped === 1 ? 'y' : 'ies'} without a depth dropped` : ''}.` : '';
-    if (!confirm(`Replace ALL data on this device (${boreholes.length} boreholes, ${readings.length} readings) with the backup from ${b.exportedAt.slice(0, 10) || 'unknown date'} (${b.boreholes.length} boreholes, ${b.readings.length} readings)?${note}${sync.config.enabled ? '\n\nSync is on: the restored data will be sent to the team sheet. Nothing is deleted from the sheet, and data from other phones comes back on the next sync.' : ''}`)) return;
+    const lost = boreholes.filter((x) => scopeOf(x) === 'local' && !b.boreholes.some((y) => y.uid === x.uid)).map((x) => x.name);
+    const localNote = lost.length ? `\n\n⚠ ${lost.length} Local borehole(s) exist only on this phone and are not in this backup: ${lost.slice(0, 5).join(', ')}${lost.length > 5 ? '…' : ''}. They and their readings will be lost.` : '';
+    if (!confirm(`Replace ALL data on this device (${boreholes.length} boreholes, ${readings.length} readings) with the backup from ${b.exportedAt.slice(0, 10) || 'unknown date'} (${b.boreholes.length} boreholes, ${b.readings.length} readings)?${note}${localNote}${sync.config.enabled ? '\n\nSync is on: the restored data will be sent to the team sheet. Nothing is deleted from the sheet, and data from other phones comes back on the next sync.' : ''}`)) return;
     await replaceAll(b.boreholes, b.readings, b.nextReadingId);
     // The User Code belongs to this phone, not the backup: keep the current one.
     setSettings({ ...b.settings, userCode: settings.userCode });

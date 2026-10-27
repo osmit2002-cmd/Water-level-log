@@ -1,3 +1,4 @@
+import { displayId } from '../lib/ids';
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
 import { describe, expect, it } from 'vitest';
@@ -179,6 +180,10 @@ describe('Shared -> Local (make a local copy)', () => {
       const rs = await db.allReadings();
       expect(rs.length).toBe(4);
       expect(new Set(rs.map((r) => r.uid)).size).toBe(4);
+      expect(new Set(rs.map((r) => displayId(r))).size).toBe(4); // copies get fresh Reading IDs
+      await db.addReading(rd('MW-1 (local)', 12));
+      expect(new Set((await db.allReadings()).map((r) => displayId(r))).size).toBe(5); // and the next new reading doesn't reuse one
+      await db.deleteReading((await db.allReadings()).find((r) => r.depthFt === 12)!.id);
       await syncOnce(s);
       await db.resetCursor(); // a full re-pull
       await syncOnce(s);
@@ -225,5 +230,16 @@ describe('pull dedupe', () => {
     const all = await s.all();
     expect(all.boreholes.length).toBe(1);
     expect(all.readings.map((r) => r.userCode)).toEqual(['B']);
+  });
+  it('a hidden Shared borehole stays hidden when a same-name borehole from another phone merges into it', async () => {
+    const s = sheet();
+    await on(phone(), async () => { await db.saveBorehole(bh('MW-7', undefined, 200)); await syncOnce(s); });
+    await on(phone(), async () => {
+      await db.saveBorehole(bh('MW-7', undefined, 200)); // made offline before ever syncing: a different uid
+      await db.setHidden('MW-7', true);
+      await syncOnce(s);
+      await syncOnce(s);
+      expect(await names()).toEqual(['MW-7:shared:hidden']);
+    });
   });
 });

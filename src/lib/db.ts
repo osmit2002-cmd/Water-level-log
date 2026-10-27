@@ -589,12 +589,21 @@ export async function makeLocalCopy(name: string, newName: string, hideShared = 
     await bs.put(copy);
     let id = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
     let n = 0;
-    for (const r of await rs.index('byBorehole').getAll(name)) {
+    // Copies get fresh Reading IDs (next number per User Code), so a copy never shows the same ID as its original.
+    const top = new Map<string, number>();
+    for (const o of await rs.getAll()) { const c = o.userCode ?? ''; top.set(c, Math.max(top.get(c) ?? 0, o.seq ?? o.id)); }
+    let nextSeq = ((await meta.get(NEXT_SEQ))?.value as number | undefined) ?? 0;
+    for (const r of (await rs.index('byBorehole').getAll(name)).sort((x, y) => x.datetime.localeCompare(y.datetime) || x.id - y.id)) {
       while (await rs.getKey(id)) id++;
-      await rs.add({ ...r, id, uid: uuid(), borehole: nn, boreholeUid: copy.uid, seq: r.seq ?? r.id });
+      const c = r.userCode ?? '';
+      const seq = (top.get(c) ?? 0) + 1;
+      top.set(c, seq);
+      nextSeq = Math.max(nextSeq, seq + 1);
+      await rs.add({ ...r, id, uid: uuid(), borehole: nn, boreholeUid: copy.uid, seq });
       id++; n++;
     }
     await meta.put({ key: NEXT_ID, value: id });
+    if (n) await meta.put({ key: NEXT_SEQ, value: nextSeq });
     if (hideShared && scopeOf(src) === 'shared') await bs.put({ ...src, hidden: true });
     await tx.done;
     return { name: nn, readings: n };
