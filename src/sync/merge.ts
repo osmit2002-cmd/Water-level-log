@@ -19,8 +19,8 @@ export function mergeBorehole(a: BoreholeRec, b: BoreholeRec): BoreholeRec {
 }
 
 /**
- * Readings: the newer edit (updatedAt) wins for the editable fields (depth, notes). The snapshotted reference
- * point/elevation, date/time, User Code and running number are immutable once a reading exists.
+ * Readings: the newer edit (updatedAt) wins for depth and notes. 0.6.0: date/time, reference point/elevation, User Code and the
+ * Reading ID number always come from the sheet (phones never change them; Odin can fix them there).
  * The borehole link follows the incoming record (a server-side merge can move readings).
  */
 export function mergeReading(local: ReadingRec, inc: ReadingRec): ReadingRec {
@@ -28,6 +28,8 @@ export function mergeReading(local: ReadingRec, inc: ReadingRec): ReadingRec {
   return {
     ...local,
     boreholeUid: inc.boreholeUid, boreholeName: inc.boreholeName,
+    // 0.6.0: the sheet is the authority for these (a hand fix in the sheet reaches every phone).
+    datetime: inc.datetime, referencePoint: inc.referencePoint, refElevationFt: inc.refElevationFt, userCode: inc.userCode, num: inc.num ?? local.num,
     depthFt: newer ? inc.depthFt : local.depthFt,
     notes: newer ? inc.notes : local.notes,
     updatedAt: newer ? inc.updatedAt : local.updatedAt

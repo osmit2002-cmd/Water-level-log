@@ -124,3 +124,15 @@ td.notes { min-width: 140px; white-space: normal; }
 .confirm { border: 2px solid var(--accent); border-radius: 12px; padding: 8px 14px; margin: 12px 0; }
 label.check { display: flex; flex-direction: row; justify-content: flex-start; align-items: center; gap: 12px; min-height: 48px; text-align: left; }
 label.check input { width: 26px; height: 26px; min-height: 0; flex: none; margin: 0; }
+/* 0.6.0 readings chart */
+.chart.multi .chart-head { display: flex; justify-content: flex-end; margin-bottom: 6px; }
+.seg.small-seg button { min-height: 40px; font-size: 15px; }
+.chart .axis-label { margin: 4px 0; font-weight: 700; font-size: 15px; }
+.chart .axis-label .muted { font-weight: 400; }
+.chart text.sub { font-size: 10px; opacity: .75; }
+.legend { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 15px; }
+.legend li { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.legend svg { flex: none; width: 26px; height: 10px; border: 0; border-radius: 0; padding: 0; margin: 0; background: none; }
+.quick { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+.quick button { flex: 1; min-height: 44px; min-width: 64px; }
+.quick button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }

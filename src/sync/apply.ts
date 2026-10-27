@@ -1,4 +1,4 @@
-import { _putBorehole, _queue, _rw, _tombstone, CURSOR, findName, fromBRec, localCopyName, toBRec, toRRec, type Tx } from '../lib/db';
+import { _putBorehole, _queue, _rw, _tombstone, CURSOR, seeNum, findName, fromBRec, localCopyName, toBRec, toRRec, type Tx } from '../lib/db';
 import { scopeOf } from '../lib/types';
 import type { Borehole, Reading } from '../lib/types';
 import { mergeBorehole, mergeFlag, mergeReading } from './merge';
@@ -114,13 +114,17 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
       const local = await rs.index('byUid').get(inc.uid);
       if (local) {
         const m = mergeReading(toRRec(local), { ...inc, boreholeName: bh.name });
-        const next: Reading = { ...local, borehole: bh.name, boreholeUid: bh.uid, depthFt: m.depthFt, notes: m.notes || undefined, updatedAt: m.updatedAt };
+        // 0.6.0: the sheet's number, date/time, reference values and User Code always win (they can be fixed by hand in the sheet).
+        const next: Reading = { ...local, borehole: bh.name, boreholeUid: bh.uid, depthFt: m.depthFt, notes: m.notes || undefined, updatedAt: m.updatedAt,
+          datetime: m.datetime, referencePoint: m.referencePoint, refElevationFt: m.refElevationFt, userCode: m.userCode, ...(m.num ? { num: m.num } : {}) };
+        await seeNum(tx, m.num);
         if (JSON.stringify(next) === JSON.stringify(local)) continue;
         await rs.put(next);
       } else {
         let id = ((await meta.get('nextReadingId'))?.value as number | undefined) ?? 1;
         while (await rs.getKey(id)) id++;
-        await rs.add({ id, uid: inc.uid, seq: inc.seq, borehole: bh.name, boreholeUid: bh.uid, datetime: inc.datetime, userCode: inc.userCode,
+        await seeNum(tx, inc.num);
+        await rs.add({ id, uid: inc.uid, seq: inc.seq, ...(inc.num ? { num: inc.num } : {}), borehole: bh.name, boreholeUid: bh.uid, datetime: inc.datetime, userCode: inc.userCode,
           referencePoint: inc.referencePoint, refElevationFt: inc.refElevationFt, depthFt: inc.depthFt, notes: inc.notes || undefined, createdAt: inc.createdAt, updatedAt: inc.updatedAt });
         await meta.put({ key: 'nextReadingId', value: id + 1 });
       }
@@ -132,7 +136,7 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
       if (t.kind === 'reading') {
         const local = await rs.index('byUid').get(t.uid);
         if (local && scopeOf(await byUid(tx, local.boreholeUid ?? '')) === 'local') continue; // 0.5.0: never delete a Local reading
-        if (local && local.updatedAt > t.deletedAt) {
+        if (local && local.updatedAt > t.deletedAt && !t.final) {
           // Edited here after it was deleted elsewhere: keep it and send it again (the sheet restores it, flagged).
           if (!(await ob.get(`r:${local.uid}`))?.failed) { await _queue(tx, 'reading', toRRec(local)); queued++; }
           continue;
@@ -176,6 +180,7 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
       await ob.delete(`b:${t.uid}`);
       await _tombstone(tx, t, false);
     }
+    await seeNum(tx, p.numMax);
     await meta.put({ key: ORPHANS, value: Object.fromEntries(orphans) });
     // Hold the cursor while a reading's borehole hasn't arrived, but not forever (e.g. a borehole row deleted by hand).
     // Counted once per sync (a sync can pull up to 3 times). Advancing is safe: the waiting readings stay parked above.

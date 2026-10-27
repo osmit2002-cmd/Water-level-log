@@ -4,6 +4,8 @@ import { inDateRange, todayLocal } from '../lib/math';
 import { csvFilename, readingsCsv } from '../lib/csv';
 import { saveFile } from '../lib/share';
 import ReadingsTable from '../ReadingsTable';
+import ReadingsChart from '../ReadingsChart';
+import { activeQuick, QUICK_DAYS, quickRange } from '../lib/chart';
 import { inScope, LIST_SCOPE, loadScope, saveScope, ScopeSwitch, type ScopeFilter } from '../Scope';
 
 export default function ReadingsList() {
@@ -39,6 +41,14 @@ export default function ReadingsList() {
             {shown.map((b) => <option key={b.name} value={b.name}>{b.name}</option>)}
           </select>
         </label>
+        {/* 0.6.0: quick ranges fill the same From/To used by the table, the CSV and the chart */}
+        <div className="quick" role="group" aria-label="Quick date range" data-testid="quick-range">
+          {QUICK_DAYS.map((d) => {
+            const on = activeQuick(from, to, todayLocal()) === d;
+            return <button key={d} type="button" className={on ? 'on' : ''} aria-pressed={on} data-testid={`quick-${d}`}
+              onClick={() => { const q = quickRange(d, todayLocal()); setFrom(q.from); setTo(q.to); }}>{d} days</button>;
+          })}
+        </div>
         <div className="row gap">
           <label>From<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} data-testid="flt-from" /></label>
           <label>To<input type="date" value={to} onChange={(e) => setTo(e.target.value)} data-testid="flt-to" /></label>
@@ -49,6 +59,7 @@ export default function ReadingsList() {
       <button className="primary wide" onClick={exportCsv} disabled={!rows.length} data-testid="export-csv">Export {rows.length} reading(s) to CSV</button>
       {msg && <p className="ok" role="status">{msg}</p>}
       {from && to && from > to && <p className="warn">"From" is after "To".</p>}
+      <ReadingsChart rows={rows} unit={u} from={from && to && from > to ? '' : from} to={from && to && from > to ? '' : to} />
       {rows.length > 0 && <ReadingsTable rows={rows} unit={u} columns={settings.columns} testid="readings-table" />}
       {!rows.length && <p className="empty">No readings match.</p>}
     </section>

@@ -39,9 +39,9 @@ describe('readings CSV', () => {
     expect(csv.startsWith(BOM)).toBe(true);
     const lines = csv.slice(1).split('\r\n');
     expect(lines[0]).toBe(HEADER_FT);
-    expect(lines[1]).toBe('JD-0001,"North, ""old"" well",2026-01-01,08:00,JD,top of casing,1050.50,20.10,1030.40,');
-    expect(lines[2]).toBe('JD-0002,"North, ""old"" well",2026-01-02,09:05,JD,top of casing,1050.50,21.00,1029.50,"a,""b"""');
-    expect(lines[3]).toBe('JD-0003,"North, ""old"" well",2026-01-03,10:30,JD,top of casing,1050.50,19.60,1030.90,\'=evil');
+    expect(lines[1]).toBe('1,"North, ""old"" well",2026-01-01,08:00,JD,top of casing,1050.50,20.10,1030.40,');
+    expect(lines[2]).toBe('2,"North, ""old"" well",2026-01-02,09:05,JD,top of casing,1050.50,21.00,1029.50,"a,""b"""');
+    expect(lines[3]).toBe('3,"North, ""old"" well",2026-01-03,10:30,JD,top of casing,1050.50,19.60,1030.90,\'=evil');
     const parsed = parseCsv(csv);
     expect(parsed).toHaveLength(4);
     expect(parsed.every((r) => r.length === 10)).toBe(true);
@@ -56,7 +56,7 @@ describe('readings CSV', () => {
     const cols = { ...DEFAULT_SETTINGS.columns, boreholeName: false, time: false, userCode: false, referencePoint: false, notes: false };
     const p = parseCsv(readingsCsv(rs, 'ft', cols));
     expect(p[0]).toEqual(['Reading ID', 'Date', 'Reference Elevation (ft)', 'Depth to Top of Water (ft)', 'Water Elevation (ft)']);
-    expect(p[1]).toEqual(['JD-0001', '2026-01-01', '1050.50', '20.10', '1030.40']);
+    expect(p[1]).toEqual(['1', '2026-01-01', '1050.50', '20.10', '1030.40']);
     const one = parseCsv(readingsCsv(rs, 'ft', { ...Object.fromEntries(Object.keys(DEFAULT_SETTINGS.columns).map((k) => [k, false])), waterElevation: true } as typeof DEFAULT_SETTINGS.columns));
     expect(one[0]).toEqual(['Water Elevation (ft)']);
   });

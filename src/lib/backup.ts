@@ -122,6 +122,9 @@ export function validateBackup(x: unknown): RestoreResult {
       if (!optUid(r.uid) || !optUid(r.boreholeUid) || !(r.seq === undefined || r.seq === null || (Number.isSafeInteger(r.seq) && (r.seq as number) > 0))) fail(`${at}: bad sync field`);
       if (r.uid) { if (uids.has(r.uid as string)) fail(`${at}: duplicate uid`); uids.add(r.uid as string); sync.uid = r.uid as string; }
       if (r.seq) sync.seq = r.seq as number;
+      // 0.6.0: the number-only Reading ID (optional; 0.5.0 backups have none and get a number when restored).
+      if (!(r.num === undefined || r.num === null || (Number.isSafeInteger(r.num) && (r.num as number) > 0))) fail(`${at}: bad Reading ID number`);
+      if (r.num) sync.num = r.num as number;
     }
     return { ...sync, id: r.id as number, borehole: (r.borehole as string).trim(), datetime: (r.datetime as string).slice(0, 16), referencePoint: String(r.referencePoint ?? ''),
       refElevationFt: r.refElevationFt as number, depthFt: r.depthFt as number, userCode: (o.version === 3 || o.version === 4) && r.userCode ? normalizeUserCode(r.userCode as string) : '', notes: (r.notes as string | undefined)?.trim() || undefined,

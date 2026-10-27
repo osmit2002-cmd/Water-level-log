@@ -48,7 +48,7 @@ Check it: paste the URL into a browser. It should say *"Water Level Log sync is 
 
 ## 6. Join each phone
 On every phone:
-1. Open Water Level Log → **Settings**, and make sure the **User Code** is set and is **different on each phone** (it is part of every Reading ID, e.g. `JD-0007`).
+1. Open Water Level Log → **Settings**, and make sure the **User Code** is set and is **different on each phone** (it is saved with every reading; since 0.6.0 the Reading ID itself is just a number, e.g. `7`).
 2. In **Sync**, paste the **Web app URL** and type the **Team code**.
 3. Tap **Turn on sync**. Everything already on the phone is uploaded. The badge at the top then shows **All synced**.
 
@@ -70,7 +70,7 @@ iPhone web apps can't sync in the background: open the app with signal to sync. 
 Someone who knows the old code can no longer read or write once it has changed. They do keep any data already on their own phone.
 
 ## Good to know
-- **Hand edits (0.4.1):** the script finds rows by their UID column and rewrites only rows that changed, appending new ones. So you can sort/filter (but not while phones are syncing, since a sort during the 1–3 s write can put values in the wrong rows; filter views are safer), add your own columns to the right, and add notes or formulas there; they survive syncs. **Don't edit the synced columns of a data row**: the phones don't see such edits, and the next app edit of that record overwrites them. Never edit or delete the UID, Rev or "Updated At" columns, and don't rename the header row. To fix a value, edit it in the app.
+- **Hand edits (0.6.0):** see *0.6.0* below. You can delete rows and fix Date, Time, Depth, Water Elevation, Notes, User Code, Reference Point/Elevation and Borehole Name in the Readings table; the phones pick it up. Don't edit the Reading ID or the hidden sync columns (they are put back). Add your own columns to the right; they survive syncs.
 - **Updating from 0.4.0:** paste the new `Code.gs` over the old one and *Deploy → Manage deployments → Edit → New version*. The Tombstones tab gains a `Restored At` column automatically.
 - **Deleting** in the app writes a row to **Tombstones**, so the item doesn't come back from another phone, unless a phone edited it *after* the delete: then it is restored, flagged ⚑ in the app, and the tombstone gets a `Restored At` time.
 - **Big catch-ups:** each request carries at most 250 changes (the app sends 100), so one sync stays far below the 6-minute script limit. If a write is cut off anyway, the phone retries and the result is the same (no duplicates).
@@ -80,3 +80,22 @@ Someone who knows the old code can no longer read or write once it has changed. 
 
 ## 0.4.3
 No setup change since 0.4.2: Code.gs is unchanged, only the app changed. A Sheet still running the 0.4.1 Code.gs should paste the new Code.gs and redeploy (Deploy > Manage deployments > Edit > New version), because 0.4.2 changed it. The URL and key stay the same.
+
+## 0.6.0: Reading IDs are numbers, and the Readings tab is a real table
+**What changes**
+- **Reading IDs are just numbers** (1, 2, 3 ...), one sequence for the whole Sheet. The Sheet hands them out, so two phones never end up with the same number, and a number is never reused, even after a delete. A phone that is offline shows a provisional number; if another phone took that number first, it changes to the next free one at the next sync. The old IDs (e.g. `OD-0007`) are kept in the hidden **Old Reading ID** column.
+- **Readings tab = one reading per row**, in a real Google Sheets *Table* (header, filter buttons, banding). The readable columns come first; the sync columns (UIDs, Seq, Rev ...) are hidden at the right. If the Table can't be created (see step 3), you get the same layout with a normal filter instead.
+- **Your edits reach the phones.** At every phone sync (or **Water Level Log → Apply my sheet edits now**):
+  - **Delete a row** (right-click the row number → *Delete row*): the reading is removed from every phone, for good. A phone that still had an edit queued for it does not bring it back. Readings a phone keeps as **Local** are never touched.
+  - **Change a value** (Date, Time, Depth, Water Elevation, Notes, User Code, Reference Point/Elevation, or Borehole Name to move it to another borehole): the phones get it. If only Water Elevation is changed, the depth is worked out from it. An invalid value (e.g. a depth that isn't a number, a borehole name that doesn't exist) is put back and the borehole gets a ⚑ note explaining why.
+  - **Undo** (Edit → Undo, or Version history) of a delete brings the reading back on the phones.
+  - If a phone edits the same reading later than you, the later edit wins (depth and notes). Date, time and reference values can only be changed in the Sheet.
+- Don't edit the **Reading ID** or the hidden columns, and don't add readings as new rows by hand (rows without a Reading UID are ignored; add readings in the app).
+
+**Update steps for Odin (once, about 5 minutes)** - the web app URL stays the same, no phone needs to re-join:
+1. Open the Sheet → **Extensions → Apps Script**. Select all of `Code.gs`, paste the new `Code.gs` over it, **Save**.
+2. Optional, for a real Table: in the Apps Script editor, left side **Services (+)** → **Google Sheets API** → **Add** (keep the identifier `Sheets`). Without it you get the same columns with a normal filter.
+3. Reload the Sheet. A **Water Level Log** menu appears. Click **Water Level Log → Set up / repair the Readings table** and allow access when asked. (If you skip this, the first phone sync does it.)
+   - It copies the old tab to **Readings before 0.6.0 (date)** first; nothing is deleted. Check the new Readings tab, then you may delete that copy.
+4. **Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy.** Do **not** make a new deployment, or the URL changes.
+5. On each phone: update the app (open it while online and reload once), then **Settings → Sync now**. The Reading IDs switch to numbers.

@@ -17,6 +17,8 @@ const ctxOpts = { ...devices['iPhone 13'], acceptDownloads: true, colorScheme: '
 const ctx = await browser.newContext(ctxOpts);
 const page = await ctx.newPage();
 const snap = async (name, sel) => { await page.evaluate((q) => q ? document.querySelector(q).scrollIntoView({ block: 'start' }) : window.scrollTo(0, 0), sel); await page.screenshot({ path: `${shots}/${name}` }); };
+// 0.6.0: Reading IDs are numbers only. First-column IDs of a readings table:
+const idsIn = (p, sel) => p.$$eval(`${sel} tbody tr`, (trs) => trs.map((t) => t.querySelector('td')?.textContent.trim()));
 const errors = [];
 const external = [];
 const watch = (p) => {
@@ -171,8 +173,8 @@ let lines = csv.replace(/^\uFEFF/, '').trim().split('\r\n');
 ok(csv.startsWith('\uFEFF'), 'CSV has a UTF-8 BOM');
 ok(lines[0] === 'Reading ID,Borehole Name,Date,Time,User Code,Reference Point,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft),Notes', 'CSV header: 10 readable columns in order');
 ok(lines.length === 5, `filtered CSV has 4 readings (${lines.length - 1})`);
-ok(lines[1] === "OD-1-0001,North Pad 1,2026-10-26,09:15,OD-1,top of casing,1050.50,22.50,1028.00,'=SUM(A1)", `CSV row keeps its original User Code after edit + formula guard (${lines[1]})`);
-ok(lines[4].startsWith('JD_2-0006,North Pad 1,2026-10-26,09:42,JD_2,top of casing,1051.00,19.60,1031.40,after rain'), 'new reading snapshots the new reference elevation');
+ok(lines[1] === "1,North Pad 1,2026-10-26,09:15,OD-1,top of casing,1050.50,22.50,1028.00,'=SUM(A1)", `CSV row keeps its original User Code after edit + formula guard (${lines[1]})`);
+ok(lines[4].startsWith('6,North Pad 1,2026-10-26,09:42,JD_2,top of casing,1051.00,19.60,1031.40,after rain'), 'new reading snapshots the new reference elevation');
 
 // Settings: column toggles
 await page.goto(url + '#/settings');
@@ -186,7 +188,7 @@ await page.goto(url + '#/readings');
 [dl] = await Promise.all([page.waitForEvent('download'), page.click('[data-testid=export-csv]')]);
 lines = readFileSync(await dl.path(), 'utf8').replace(/^\uFEFF/, '').trim().split('\r\n');
 ok(lines[0] === 'Reading ID,Borehole Name,Date,User Code,Reference Elevation (ft),Depth to Top of Water (ft),Water Elevation (ft)', `CSV only has columns switched on (${lines[0]})`);
-ok(lines.some((l) => l === 'OD-1-0003,MW-2,2026-10-26,OD-1,987.25,5.00,982.25'), 'row values follow the toggled columns');
+ok(lines.some((l) => l === '3,MW-2,2026-10-26,OD-1,987.25,5.00,982.25'), 'row values follow the toggled columns');
 const tableHeads = await page.$$eval('[data-testid=readings-table] th', (t) => t.length);
 ok(tableHeads === 7, `readings table shows the same 7 columns (${tableHeads})`);
 await page.goto(url + '#/borehole/North%20Pad%201');
@@ -236,7 +238,7 @@ await page.reload();
 await page.waitForSelector('[data-testid=borehole-list] li');
 ok((await page.textContent('[data-testid=borehole-list]')).includes('1031.40'), 'offline reload shows stored data');
 await addReading('MW-2', '4.5');
-ok((await page.textContent('[data-testid=history]')).includes('JD_2-0007'), 'can add a reading while offline (JD_2-0007)');
+ok((await idsIn(page, '[data-testid=history]')).includes('7'), 'can add a reading while offline (Reading ID 7)');
 await ctx.setOffline(false);
 if (shots) {
   await page.emulateMedia({ colorScheme: 'dark' });
@@ -283,14 +285,14 @@ await p2.goto(url + '#/readings');
 const migCodes = await p2.$$eval('[data-testid=readings-table] tbody tr', (trs) => trs.map((t) => t.querySelectorAll('td')[4].textContent));
 ok(migCodes.length === 3 && migCodes.every((c) => c === ''), 'migrated readings have a blank User Code');
 const mig = await p2.$$eval('[data-testid=readings-table] tbody tr', (trs) => trs.map((t) => [...t.querySelectorAll('td')].slice(0, 3).map((c) => c.textContent).join(' ')));
-ok(JSON.stringify(mig.reverse()) === JSON.stringify(['LEGACY-0001 North pad 2026-09-20', 'LEGACY-0002 MW-2 2026-10-01', 'LEGACY-0003 North pad 2026-10-15']), `migrated Reading IDs assigned by date/time, LEGACY- prefix (no User Code) (${mig.join(', ')})`);
+ok(JSON.stringify(mig.reverse()) === JSON.stringify(['1 North pad 2026-09-20', '2 MW-2 2026-10-01', '3 North pad 2026-10-15']), `migrated Reading IDs numbered 1..3 by date/time (${mig.join(', ')})`);
 await p2.goto(url + '#/reading/new?bh=MW-2');
 await p2.fill('[data-testid=rd-depth]', '6');
 await p2.click('[data-testid=rd-save]');
 await p2.fill('[data-testid=uc-prompt-input]', 'NEW');
 await p2.click('[data-testid=uc-prompt-save]');
 await p2.waitForSelector('[data-testid=history]');
-ok((await p2.textContent('[data-testid=history]')).includes('NEW-0004'), 'next reading after migration gets NEW-0004');
+ok((await idsIn(p2, '[data-testid=history]')).includes('4'), 'next reading after migration gets Reading ID 4');
 const arch = await p2.evaluate(() => new Promise((res) => { const rq = indexedDB.open('water-level-log'); rq.onsuccess = () => { const g = rq.result.transaction('meta').objectStore('meta').get('v1Archive'); g.onsuccess = () => { res(g.result?.value?.readings?.length); rq.result.close(); }; }; }));
 ok(arch === 4, 'original v1 data (incl. the Dry entry) is kept in an archive record');
 await ctx2.close();
@@ -350,7 +352,7 @@ await waitBadge(pa, 'synced');
 ok((await pa.textContent('[data-testid=sync-badge]')) === 'All synced', 'badge: All synced');
 const aCount = (await pa.evaluate(() => new Promise((res) => { const rq = indexedDB.open('water-level-log'); rq.onsuccess = () => { const g = rq.result.transaction('readings').objectStore('readings').count(); g.onsuccess = () => { res(g.result); rq.result.close(); }; }; })));
 ok(sheetRows('Readings').length === aCount && sheetRows('Boreholes').length === 2, `existing data uploaded to the Sheet (${sheetRows('Readings').length} readings, ${sheetRows('Boreholes').length} boreholes)`);
-ok(sheetRows('Readings').some((r) => r['Reading ID'] === 'OD-1-0001' && r['Borehole Name'] === 'North Pad 1' && r.Notes === '=SUM(A1)' && server.ss.getSheetByName('Readings').quoted.has('=SUM(A1)')), 'Sheet rows are readable (Reading ID, Borehole Name) and formula-guarded');
+ok(sheetRows('Readings').some((r) => String(r['Reading ID']) === '1' && r['Borehole Name'] === 'North Pad 1' && r.Notes === '=SUM(A1)' && server.ss.getSheetByName('Readings').quoted.has('=SUM(A1)')), 'Sheet rows are readable (Reading ID, Borehole Name) and formula-guarded');
 ok((await pa.textContent('[data-testid=sync-last]')) !== 'Never', `last synced time shown (${await pa.textContent('[data-testid=sync-last]')})`);
 if (shots) { await pa.evaluate(() => document.querySelector('[data-testid=sync-section]').scrollIntoView({ block: 'start' })); await pa.screenshot({ path: `${shots}/8-sync-settings-on.png` }); }
 
@@ -380,13 +382,16 @@ await pb.click('[data-testid=uc-prompt-save]');
 await pb.waitForSelector('[data-testid=history]');
 await pb.waitForSelector('[data-testid=sync-badge]:has-text("1 waiting")', { timeout: 10000 });
 ok(['offline', 'waiting', 'error'].includes(await badge(pb)), `offline save is queued: badge "${await pb.textContent('[data-testid=sync-badge]')}"`);
-ok(!sheetRows('Readings').some((r) => r['Reading ID'] === 'BK-0001'), 'queued reading not on the Sheet yet');
+ok(!sheetRows('Readings').some((r) => r['User Code'] === 'BK'), 'queued reading not on the Sheet yet');
 if (shots) { await pb.evaluate(() => window.scrollTo(0, 0)); await pb.screenshot({ path: `${shots}/9-badge-waiting-offline.png` }); }
 serverDown = false;
 await ctx3.setOffline(false);
 await pb.evaluate(() => window.dispatchEvent(new Event('online')));
 await waitBadge(pb, 'synced');
-ok(sheetRows('Readings').some((r) => r['Reading ID'] === 'BK-0001' && r['Borehole Name'] === 'MW-2' && r['User Code'] === 'BK'), 'back online: queued reading reaches the Sheet');
+const bkRow = sheetRows('Readings').find((r) => r['User Code'] === 'BK');
+const BKID = String(bkRow?.['Reading ID']);
+ok(/^\d+$/.test(BKID) && sheetRows('Readings').filter((r) => String(r['Reading ID']) === BKID).length === 1, `the Sheet gives the queued reading a unique number (${BKID})`);
+ok(sheetRows('Readings').some((r) => String(r['Reading ID']) === BKID && r['Borehole Name'] === 'MW-2' && r['User Code'] === 'BK'), 'back online: queued reading reaches the Sheet');
 if (shots) { await pb.evaluate(() => window.scrollTo(0, 0)); await pb.screenshot({ path: `${shots}/10-badge-all-synced.png` }); }
 
 // Phone A pulls it: both phones converge.
@@ -395,34 +400,34 @@ await pa.click('[data-testid=sync-now]');
 await waitBadge(pa, 'synced');
 await pa.goto(url + '#/readings'); await pb.goto(url + '#/readings');
 const ra = await rowIds(pa), rb = await rowIds(pb);
-ok(ra.includes('BK-0001') && JSON.stringify(ra) === JSON.stringify(rb), `two phones converge (${ra.length} readings each)`);
+ok(ra.includes(BKID) && JSON.stringify(ra) === JSON.stringify(rb), `two phones converge (${ra.length} readings each)`);
 
 // Edit on A is visible on B (newest edit wins).
-const bkLocal = await pa.$$eval('[data-testid=readings-table] tbody tr', (trs) => trs.find((t) => t.querySelector('td')?.textContent.trim() === 'BK-0001')?.dataset.readingId);
-ok(!!bkLocal, `BK-0001 row found on phone A (${bkLocal})`);
+const bkLocal = await pa.$$eval('[data-testid=readings-table] tbody tr', (trs, id) => trs.find((t) => t.querySelector('td')?.textContent.trim() === id)?.dataset.readingId, BKID);
+ok(!!bkLocal, `reading ${BKID} row found on phone A (${bkLocal})`);
 await pa.goto(url + `#/reading/${bkLocal}`);
 await pa.fill('[data-testid=rd-depth]', '3.5');
 await pa.click('[data-testid=rd-save]');
 await pa.waitForSelector('[data-testid=history]');
 await pa.waitForSelector('[data-testid=sync-badge][data-state=synced]', { timeout: 15000 });
-ok(sheetRows('Readings').find((r) => r['Reading ID'] === 'BK-0001')['Depth to Top of Water (ft)'] === 3.5, 'edit on phone A is pushed after the save (debounced)');
+ok(sheetRows('Readings').find((r) => String(r['Reading ID']) === BKID)['Depth to Top of Water (ft)'] === 3.5, 'edit on phone A is pushed after the save (debounced)');
 
-// Tombstone delete: A deletes BK-0001; B removes it on its next sync and it never comes back.
+// Tombstone delete: A deletes B's reading; B removes it on its next sync and it never comes back.
 await pa.goto(url + `#/reading/${bkLocal}`);
 pa.once('dialog', (d) => d.accept());
 await pa.click('text=Delete reading');
 await pa.waitForSelector('[data-testid=history]');
 await waitBadge(pa, 'synced');
 for (let i = 0; i < 30 && !sheetRows('Tombstones').length; i++) await pa.waitForTimeout(250);
-ok(sheetRows('Tombstones').some((t) => t.Kind === 'reading') && !sheetRows('Readings').some((r) => r['Reading ID'] === 'BK-0001'), 'delete goes to the Sheet as a tombstone and the row is removed');
+ok(sheetRows('Tombstones').some((t) => t.Kind === 'reading') && !sheetRows('Readings').some((r) => String(r['Reading ID']) === BKID), 'delete goes to the Sheet as a tombstone and the row is removed');
 await pb.goto(url + '#/settings');
 await pb.click('[data-testid=sync-now]');
 await waitBadge(pb, 'synced');
 await pb.goto(url + '#/readings');
-ok(!(await rowIds(pb)).includes('BK-0001'), 'phone B: the deleted reading disappears');
+ok(!(await rowIds(pb)).includes(BKID), 'phone B: the deleted reading disappears');
 await pb.goto(url + '#/settings'); await pb.click('[data-testid=sync-now]'); await waitBadge(pb, 'synced');
 await pb.goto(url + '#/readings'); await pa.goto(url + '#/readings');
-ok(!(await rowIds(pb)).includes('BK-0001') && JSON.stringify(await rowIds(pa)) === JSON.stringify(await rowIds(pb)), 'deleted reading does not come back; phones still match');
+ok(!(await rowIds(pb)).includes(BKID) && JSON.stringify(await rowIds(pa)) === JSON.stringify(await rowIds(pb)), 'deleted reading does not come back; phones still match');
 
 // Same borehole name created on both phones -> one borehole, flagged for checking.
 await pa.goto(url + '#/new-borehole');
@@ -453,20 +458,20 @@ const syncNow = async (p) => { await p.goto(url + '#/settings'); await p.click('
   const hdr = sh.getRange(1, 1, 1, sh.getLastColumn()).getValues()[0];
   const rows = sh.getRange(2, 1, sh.getLastRow() - 1, hdr.length).getValues();
   const idCol = hdr.indexOf('Reading ID'), notesCol = hdr.indexOf('Notes');
-  const ri = rows.findIndex((r) => r[idCol] !== 'OD-1-0001');
+  const ri = rows.findIndex((r) => String(r[idCol]) !== '1');
   var handId = rows[ri][idCol];
   sh.getRange(ri + 2, notesCol + 1, 1, 1).setValues([['checked by hand']]);
   sh.getRange(ri + 2, hdr.length + 1, 1, 1).setValues([['my own column']]);
 }
-// #6 Phone A opens OD-1-0001; phone B changes it and syncs; A's save shows the newer values and asks.
-const aId = await localId(pa, 'OD-1-0001'), bId = await localId(pb, 'OD-1-0001');
+// #6 Phone A opens 1; phone B changes it and syncs; A's save shows the newer values and asks.
+const aId = await localId(pa, '1'), bId = await localId(pb, '1');
 await pa.goto(url + `#/reading/${aId}`);
 await pa.waitForSelector('[data-testid=rd-depth]');
 await pb.goto(url + `#/reading/${bId}`);
 await pb.fill('[data-testid=rd-depth]', '4.25');
 await pb.click('[data-testid=rd-save]');
 await pb.waitForSelector('[data-testid=history]');
-for (let i = 0; i < 40 && sheetRows('Readings').find((r) => r['Reading ID'] === 'OD-1-0001')['Depth to Top of Water (ft)'] !== 4.25; i++) await pb.waitForTimeout(250);
+for (let i = 0; i < 40 && sheetRows('Readings').find((r) => String(r['Reading ID']) === '1')['Depth to Top of Water (ft)'] !== 4.25; i++) await pb.waitForTimeout(250);
 await pa.evaluate(() => window.dispatchEvent(new Event('online'))); // A syncs in the background while its form is open
 await pa.waitForTimeout(2500);
 await pa.fill('[data-testid=rd-notes]', 'mine');
@@ -476,8 +481,8 @@ ok((await pa.textContent('[data-testid=rd-conflict-newer]')).includes('4.25'), '
 if (shots) await snapP(pa, '13-edit-conflict.png', '[data-testid=rd-conflict]');
 await pa.click('[data-testid=rd-conflict-mine]');
 await pa.waitForSelector('[data-testid=history]');
-for (let i = 0; i < 40 && sheetRows('Readings').find((r) => r['Reading ID'] === 'OD-1-0001').Notes !== 'mine'; i++) await pa.waitForTimeout(250);
-ok(sheetRows('Readings').find((r) => r['Reading ID'] === 'OD-1-0001').Notes === 'mine', '#6 "Save mine anyway" overwrites after confirmation');
+for (let i = 0; i < 40 && sheetRows('Readings').find((r) => String(r['Reading ID']) === '1').Notes !== 'mine'; i++) await pa.waitForTimeout(250);
+ok(sheetRows('Readings').find((r) => String(r['Reading ID']) === '1').Notes === 'mine', '#6 "Save mine anyway" overwrites after confirmation');
 ok(sheetRows('Readings').find((r) => r['Reading ID'] === handId).Notes === 'checked by hand' && server.ss.getSheetByName('Readings').getRange(2, 1, server.ss.getSheetByName('Readings').getLastRow() - 1, server.ss.getSheetByName('Readings').getLastColumn()).getValues().some((r) => r.includes('my own column')), '#3 hand edits to other rows and extra columns survive a sync');
 // #5 A change the Sheet rejects shows as "1 failed" with the reason; Retry and Discard work.
 mangle = (b) => { const j = JSON.parse(b); for (const r of j.readings ?? []) if (r.depthFt === 7.77) r.datetime = 'not a date'; return JSON.stringify(j); };
@@ -594,6 +599,70 @@ await waitBadge(pa, 'synced');
   ok(true, '0.5.0 Show again unhides');
 }
 await ctx3.close();
+
+// ---------- 0.6.0 number-only Reading IDs and the readings chart ----------
+{
+  const { writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  // A year of readings for two boreholes (every 5 days), restored from a backup file.
+  const day0 = Date.parse('2026-10-26T13:00:00Z');
+  const rs = [];
+  for (let d = 0; d < 400; d += 5) for (const [b, base] of [['mw1', 12], ['mw2', 18]]) {
+    const dt = new Date(day0 - d * 86400000 - 4 * 3600000).toISOString().slice(0, 16);
+    rs.push({ uid: `u-${b}-${String(d).padStart(4, '0')}`, boreholeId: b, datetime: dt, refElevationFt: b === 'mw1' ? 100 : 104, depthFt: +(base + 2 * Math.sin(d / 30) + d / 200).toFixed(2) });
+  }
+  const bk6 = { format: 'water-level-log-backup', version: 1, exportedAt: new Date(day0).toISOString(), app: 'e2e', boreholes: [{ id: 'mw1', name: 'MW-1', refElevationFt: 100 }, { id: 'mw2', name: 'MW-2', refElevationFt: 104 }], readings: rs };
+  const f6 = `${tmpdir()}/wl-e2e-060.json`;
+  writeFileSync(f6, JSON.stringify(bk6));
+  const ctx4 = await browser.newContext({ ...ctxOpts, serviceWorkers: 'block' });
+  const pc = await ctx4.newPage();
+  watch(pc);
+  await pc.clock.setFixedTime(new Date('2026-10-26T13:15:00Z'));
+  await pc.goto(url + '#/settings');
+  pc.once('dialog', (d) => d.accept());
+  await pc.setInputFiles('[data-testid=restore]', f6);
+  await pc.waitForTimeout(1500);
+  await pc.goto(url + '#/readings');
+  await pc.waitForSelector('[data-testid=readings-table] tbody tr');
+  const firstIds = await pc.$$eval('[data-testid=readings-table] tbody tr', (t) => t.map((r) => r.querySelector('td').textContent.trim()));
+  ok(firstIds.length > 0 && firstIds.every((x) => /^\d+$/.test(x)), `0.6.0 Reading IDs are numbers only (${firstIds.slice(0, 4).join(', ')})`);
+  ok(new Set(firstIds).size === firstIds.length, '0.6.0 Reading IDs are unique');
+  const nPts = async () => pc.$$eval('[data-testid=chart-series] circle, [data-testid=chart-series] path', (x) => x.length);
+  const rowsN = () => pc.$$eval('[data-testid=readings-table] tbody tr', (t) => t.length);
+  // Screenshot from the quick buttons down to the chart legend (one tall iPhone-width image).
+  const snapChart = async (name) => {
+    const box = await pc.evaluate(() => { const a = document.querySelector('[data-testid=quick-range]').getBoundingClientRect(), b = document.querySelector('[data-testid=readings-chart]').getBoundingClientRect(); return { y: a.top + scrollY - 8, h: b.bottom - a.top + 16 }; });
+    await pc.addStyleTag({ content: 'nav, .tabbar { visibility: hidden !important; }' }).catch(() => {});
+    await pc.screenshot({ path: `${shots}/${name}`, fullPage: true, clip: { x: 0, y: box.y, width: 390, height: box.h } });
+  };
+  const counts = {};
+  for (const n of [7, 28, 180, 365]) {
+    await pc.click(`[data-testid=quick-${n}]`);
+    ok(await pc.getAttribute(`[data-testid=quick-${n}]`, 'aria-pressed') === 'true', `0.6.0 quick ${n} days is selected`);
+    const from = await pc.inputValue('[data-testid=flt-from]'), to = await pc.inputValue('[data-testid=flt-to]');
+    const exp = new Date(Date.parse('2026-10-26T12:00:00Z') - (n - 1) * 86400000).toISOString().slice(0, 10);
+    ok(to === '2026-10-26' && from === exp, `0.6.0 quick ${n} sets From ${from} To ${to}`);
+    counts[n] = await rowsN();
+    ok(await pc.isVisible('[data-testid=chart-svg]') && (await nPts()) > 0, `0.6.0 chart draws for ${n} days (${counts[n]} readings)`);
+    if (shots) await snapChart(`30-chart-${n}d.png`);
+  }
+  ok(counts[7] < counts[28] && counts[28] < counts[180] && counts[180] < counts[365], `0.6.0 longer ranges show more readings ${JSON.stringify(counts)}`);
+  ok((await pc.$$eval('[data-testid=chart-legend] li, [data-testid=chart-legend] span', (x) => x.map((e) => e.textContent).join('|'))).includes('MW-2'), '0.6.0 one line per borehole, legend names them');
+  await pc.fill('[data-testid=flt-from]', '2026-03-01');
+  await pc.fill('[data-testid=flt-to]', '2026-04-30');
+  ok(!(await pc.$$eval('[data-testid=quick-range] [aria-pressed=true]', (x) => x.length)), '0.6.0 custom range clears the quick buttons');
+  ok(await rowsN() > 0 && await pc.isVisible('[data-testid=chart-svg]'), '0.6.0 chart follows the custom From/To');
+  if (shots) await snapChart('34-chart-custom-range.png');
+  await pc.click('[data-testid=chart-depth]');
+  ok((await pc.textContent('[data-testid=chart-axis]')).includes('deeper'), '0.6.0 depth view labels the flipped axis');
+  if (shots) await snapChart('35-chart-depth.png');
+  await pc.selectOption('[data-testid=flt-bh]', { label: 'MW-1' }).catch(async () => pc.selectOption('[data-testid=flt-bh]', 'MW-1'));
+  ok(await pc.$$eval('[data-testid=chart-series]', (x) => x.length) === 1, '0.6.0 borehole filter leaves one line');
+  await pc.click('[data-testid=chart-elev]');
+  await pc.click('[data-testid=quick-28]');
+  if (shots) await snapP(pc, '36-reading-ids.png', '[data-testid=readings-table]');
+  await ctx4.close();
+}
 
 ok(external.length === 0, `no requests leave the app origin (${external.length})`);
 ok(errors.length === 0, `no page errors ${errors.join(' | ')}`);

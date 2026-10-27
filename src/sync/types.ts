@@ -21,6 +21,8 @@ export interface ReadingRec {
   datetime: string; // local "YYYY-MM-DDTHH:mm"
   userCode: string;
   seq: number;
+  /** 0.6.0: the Reading ID number (assigned by the sheet; a phone sends its provisional one). */
+  num?: number;
   /** Snapshotted at save; never changed by sync. */
   referencePoint: string;
   refElevationFt: number;
@@ -37,6 +39,8 @@ export interface TombRec {
   mergedInto?: string;
   /** Set by the server when the delete was undone (an edit newer than the delete, or readings the deleting phone had not seen). */
   restoredAt?: string;
+  /** 0.6.0: the row was deleted by hand in the sheet. Final: phones delete their copy even if it was edited later. */
+  final?: boolean;
 }
 export interface PushBatch { boreholes: BoreholeRec[]; readings: ReadingRec[]; tombstones: TombRec[] }
 /** acked: keys "b:uid", "r:uid", "t:uid" the server has stored (or deliberately ignored). Unacked items stay queued. */
@@ -48,7 +52,7 @@ export interface PushResult {
   /** Valid but not stored yet (e.g. its borehole is not on the sheet yet): stays waiting. */
   held?: ItemNote[];
 }
-export interface PullResult { cursor: number; boreholes: BoreholeRec[]; readings: ReadingRec[]; tombstones: TombRec[] }
+export interface PullResult { cursor: number; boreholes: BoreholeRec[]; readings: ReadingRec[]; tombstones: TombRec[]; /** 0.6.0: highest Reading ID used on the sheet. */ numMax?: number }
 export interface AdapterStatus { ok: boolean; message: string }
 
 /**

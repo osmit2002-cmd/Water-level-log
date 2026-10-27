@@ -45,6 +45,8 @@ export interface Reading {
   boreholeUid?: string;
   /** Per-phone running number used in the display ID USERCODE-0001 (legacy readings: their old Reading ID). */
   seq?: number;
+  /** 0.6.0: the Reading ID shown everywhere (number only). Set by the sheet for Shared readings; provisional until synced. */
+  num?: number;
 }
 
 /** Report/CSV columns, in their fixed order. */

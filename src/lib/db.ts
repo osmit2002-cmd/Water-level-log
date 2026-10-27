@@ -33,10 +33,12 @@ interface WLSchema extends DBSchema {
 /** A tombstone as stored on this phone. `localOnly` (0.5.0): the deleted record was Local, so the delete is never sent. */
 export type LocalTomb = TombRec & { localOnly?: boolean };
 export const DB_NAME = 'water-level-log';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 const NEXT_ID = 'nextReadingId'; // internal local key counter
 const NEXT_SEQ = 'nextSeq'; // this phone's running number for display IDs
 export const CURSOR = 'syncCursor';
+/** 0.6.0: highest Reading ID (number) this phone has used or seen from the sheet. */
+export const NUM_HWM = 'numHwm';
 type Names = StoreNames<WLSchema>;
 type Tx = IDBPTransaction<WLSchema, Names[], 'readwrite'>;
 
@@ -85,6 +87,15 @@ export function db() {
         const next = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
         await meta.put({ key: NEXT_SEQ, value: next });
       }
+      if (oldVersion < 4) {
+        // 0.6.0: number-only Reading IDs. Number every reading 1..N in date order (same order the sheet's one-time setup uses);
+        // shared readings get the sheet's number on the next sync.
+        const rs = tx.objectStore('readings'), meta = tx.objectStore('meta');
+        const all = (await rs.getAll()).sort((a, b) => a.datetime.localeCompare(b.datetime) || a.createdAt.localeCompare(b.createdAt) || (a.uid ?? '').localeCompare(b.uid ?? ''));
+        let n = 0;
+        for (const r of all) await rs.put({ ...r, num: ++n });
+        await meta.put({ key: NUM_HWM, value: n });
+      }
      } catch (e) { try { tx.abort(); } catch { /* already aborted */ } throw e; }
     },
     blocking() { void dbp?.then((d) => d.close()); dbp = undefined; },
@@ -114,7 +125,26 @@ export function fromBRec(r: BoreholeRec): Borehole {
 }
 export function toRRec(r: Reading): ReadingRec {
   return { uid: r.uid!, displayId: displayId(r), boreholeUid: r.boreholeUid!, boreholeName: r.borehole, datetime: r.datetime, userCode: r.userCode ?? '',
-    seq: r.seq ?? r.id, referencePoint: r.referencePoint, refElevationFt: r.refElevationFt, depthFt: r.depthFt, notes: r.notes ?? '', createdAt: r.createdAt, updatedAt: r.updatedAt };
+    seq: r.seq ?? r.id, ...(r.num ? { num: r.num } : {}), referencePoint: r.referencePoint, refElevationFt: r.refElevationFt, depthFt: r.depthFt, notes: r.notes ?? '', createdAt: r.createdAt, updatedAt: r.updatedAt };
+}
+
+// ---- 0.6.0 Reading ID numbers (inside a caller's transaction) ----
+/**
+ * Next number for a reading saved on this phone: one past the highest number seen here (own readings or from the sheet).
+ * For a Shared reading this is provisional: the sheet assigns the final number when it arrives (it differs only if
+ * another phone saved a reading in between). Local readings keep it.
+ */
+export async function takeNum(tx: Tx): Promise<number> {
+  const meta = tx.objectStore('meta');
+  let hwm = ((await meta.get(NUM_HWM))?.value as number | undefined) ?? 0;
+  for (const o of await tx.objectStore('readings').getAll()) if ((o.num ?? 0) > hwm) hwm = o.num!;
+  await meta.put({ key: NUM_HWM, value: hwm + 1 });
+  return hwm + 1;
+}
+export async function seeNum(tx: Tx, n: number | undefined) {
+  if (!n) return;
+  const meta = tx.objectStore('meta');
+  if (n > (((await meta.get(NUM_HWM))?.value as number | undefined) ?? 0)) await meta.put({ key: NUM_HWM, value: n });
 }
 
 // ---- outbox / tombstones (inside a caller's transaction) ----
@@ -217,7 +247,7 @@ export async function addReading(r: Omit<Reading, 'id'>): Promise<number> {
       const code = r.userCode ?? '';
       for (const o of await rs.getAll()) if ((o.userCode ?? '') === code && (o.seq ?? o.id) >= seq) seq = (o.seq ?? o.id) + 1;
     }
-    const full: Reading = { ...r, id, uid: r.uid ?? uuid(), boreholeUid, seq };
+    const full: Reading = { ...r, id, uid: r.uid ?? uuid(), boreholeUid, seq, num: r.num ?? (await takeNum(tx)) };
     await rs.add(full);
     await meta.put({ key: NEXT_ID, value: id + 1 });
     if (r.seq === undefined) await meta.put({ key: NEXT_SEQ, value: seq + 1 });
@@ -366,6 +396,7 @@ export async function replaceAll(boreholes: Borehole[], readings: Reading[], nex
   for (const r0 of readings) {
     const r = { ...r0, uid: r0.uid ?? uuid(), seq: r0.seq ?? r0.id, boreholeUid: uidOf.get(r0.borehole) };
     if (dead.has(r.uid) || !r.boreholeUid) continue;
+    if (!r.num) r.num = await takeNum(tx); else await seeNum(tx, r.num);
     maxSeq = Math.max(maxSeq, r.seq);
     await tx.objectStore('readings').put(r);
     await queue(tx, 'reading', toRRec(r));
@@ -507,7 +538,7 @@ export async function adoptRemoteIds(p: PullResult): Promise<{ boreholes: number
         r.datetime === rr.datetime && Math.abs(r.depthFt - rr.depthFt) < 1e-6 && (r.userCode ?? '') === (rr.userCode ?? ''));
       if (!m) continue;
       if (m.uid) await ob.delete(`r:${m.uid}`);
-      const next = { ...m, uid: rr.uid, seq: rr.seq };
+      const next = { ...m, uid: rr.uid, seq: rr.seq, num: rr.num ?? m.num };
       used.add(m.id);
       await rs.put(next);
       nr++;
@@ -596,8 +627,8 @@ export async function makeLocalCopy(name: string, newName: string, hideShared = 
     for (const o of await rs.getAll()) if ((o.userCode ?? '') === code && (o.seq ?? o.id) >= nextSeq) nextSeq = (o.seq ?? o.id) + 1;
     for (const r of (await rs.index('byBorehole').getAll(name)).sort((x, y) => x.datetime.localeCompare(y.datetime) || x.id - y.id)) {
       while (await rs.getKey(id)) id++;
-      const note = `Copy of ${displayId(r)}`;
-      await rs.add({ ...r, id, uid: uuid(), borehole: nn, boreholeUid: copy.uid, userCode: code, seq: nextSeq++, notes: r.notes ? `${note}. ${r.notes}` : note });
+      const note = `Copy of reading ${displayId(r)}`;
+      await rs.add({ ...r, id, uid: uuid(), borehole: nn, boreholeUid: copy.uid, userCode: code, seq: nextSeq++, num: await takeNum(tx), notes: r.notes ? `${note}. ${r.notes}` : note });
       id++; n++;
     }
     await meta.put({ key: NEXT_ID, value: id });

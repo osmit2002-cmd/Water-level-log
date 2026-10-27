@@ -31,9 +31,12 @@ describe('reading merge', () => {
   it('newer edit wins for depth and notes; reference values, date/time, code and number never change', () => {
     const local = rd();
     const inc = rd({ depthFt: 12, notes: 'pump on', updatedAt: T2, refElevationFt: 999, referencePoint: 'x', datetime: '2027-01-01T00:00', userCode: 'ZZ', seq: 9 });
-    const m = mergeReading(local, inc);
+    const m = mergeReading({ ...local, num: 4 }, { ...inc, num: 7 });
     expect([m.depthFt, m.notes, m.updatedAt]).toEqual([12, 'pump on', T2]);
-    expect([m.refElevationFt, m.referencePoint, m.datetime, m.userCode, m.seq]).toEqual([100, 'top of casing', '2026-10-26T09:15', 'OD', 1]);
+    // 0.6.0: the sheet always sets date/time, reference values, code and number
+    expect([m.refElevationFt, m.referencePoint, m.datetime, m.userCode, m.num, m.seq]).toEqual([999, 'x', '2027-01-01T00:00', 'ZZ', 7, 1]);
+    const o = mergeReading(rd({ updatedAt: T2, depthFt: 5, num: 4 }), rd({ depthFt: 1, datetime: '2026-10-25T08:00', num: 4 }));
+    expect([o.depthFt, o.datetime, o.num]).toEqual([5, '2026-10-25T08:00', 4]); // older copy: sheet fields yes, depth no
   });
   it('older incoming edit is ignored, but a moved borehole link is taken', () => {
     const m = mergeReading(rd({ depthFt: 11, updatedAt: T3 }), rd({ depthFt: 12, updatedAt: T2, boreholeUid: 'b2', boreholeName: 'MW-2' }));
@@ -43,13 +46,10 @@ describe('reading merge', () => {
 });
 
 describe('IDs', () => {
-  it('formats USERCODE-0001 with a per-phone number', () => {
-    expect(displayId({ userCode: 'OD-1', seq: 1, id: 7 })).toBe('OD-1-0001');
-    expect(displayId({ userCode: 'JD', seq: 12345, id: 1 })).toBe('JD-12345');
-  });
-  it('legacy readings keep their number; no User Code => LEGACY-', () => {
-    expect(displayId({ userCode: '', seq: undefined, id: 3 })).toBe('LEGACY-0003');
-    expect(displayId({ userCode: 'OD', seq: undefined, id: 42 })).toBe('OD-0042');
+  it('0.6.0: the Reading ID is just the number (sheet number, else the old running number)', () => {
+    expect(displayId({ num: 12, seq: 1, id: 7 })).toBe('12');
+    expect(displayId({ num: undefined, seq: 5, id: 7 })).toBe('5');
+    expect(displayId({ num: undefined, seq: undefined, id: 3 })).toBe('3');
   });
   it('uuid is v4 and unique', () => {
     const a = uuid(), b = uuid();

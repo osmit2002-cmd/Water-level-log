@@ -40,11 +40,11 @@ describe('Apps Script: sheets', () => {
   it('creates human-readable sheets with the app column names', () => {
     push([bh()], [rd({ notes: '=HYPERLINK("x")' })]);
     const R = sheet('Readings');
-    expect(R.data[0].slice(0, 10)).toEqual(['Reading ID', 'Borehole Name', 'Date', 'Time', 'User Code', 'Reference Point', 'Reference Elevation (ft)', 'Depth to Top of Water (ft)', 'Water Elevation (ft)', 'Notes']);
-    expect(R.objects()[0]).toMatchObject({ 'Reading ID': 'OD-0001', 'Borehole Name': 'MW-1', Date: '2026-10-26', Time: '09:15', 'Water Elevation (ft)': 90, Notes: '=HYPERLINK("x")' });
+    expect(R.data[0].slice(0, 10)).toEqual(['Reading ID', 'Borehole Name', 'Date', 'Time', 'Depth to Top of Water (ft)', 'Water Elevation (ft)', 'Reference Point', 'Reference Elevation (ft)', 'Notes', 'User Code']);
+    expect(R.objects()[0]).toMatchObject({ 'Reading ID': 1, 'Borehole Name': 'MW-1', Date: '2026-10-26', Time: '09:15', 'Water Elevation (ft)': 90, Notes: '=HYPERLINK("x")' });
     expect(R.quoted.has('=HYPERLINK("x")')).toBe(true); // written with a leading ' so Sheets keeps it as text
     expect(sheet('Boreholes').data[0].slice(0, 3)).toEqual(['Borehole Name', 'Reference Point', 'Reference Elevation (ft)']);
-    expect(sheet('Tombstones').data[0]).toEqual(['Kind', 'UID', 'Deleted At', 'Merged Into', 'Rev', 'Restored At']);
+    expect(sheet('Tombstones').data[0]).toEqual(['Kind', 'UID', 'Deleted At', 'Merged Into', 'Rev', 'Restored At', 'Source']);
     expect(R.frozen).toBe(1);
     expect(pull().readings[0].notes).toBe('=HYPERLINK("x")'); // formula guard is invisible to the app
   });
@@ -193,7 +193,7 @@ describe('Apps Script: 0.4.1 hardening', () => {
     push([], [], [{ uid: 'r1', kind: 'reading', deletedAt: T2 }]); // phone B deleted it at T2
     let p = pull();
     expect(p.readings.map((r: ReadingRec) => r.uid)).toEqual(['r1']);
-    expect(p.boreholes[0].flag).toMatch(/Reading OD-0001 was deleted on a phone but edited later/);
+    expect(p.boreholes[0].flag).toMatch(/Reading 1 was deleted on a phone but edited later/);
     // a newer delete wins
     push([], [], [{ uid: 'r1', kind: 'reading', deletedAt: '2026-10-26T13:00:00.000Z' }]);
     expect(pull().readings).toEqual([]);
@@ -212,16 +212,18 @@ describe('Apps Script: 0.4.1 hardening', () => {
     R.data[2][hd.indexOf('Notes')] = 'hand note'; // hand edit to row of r1
     const before = R.rowsWritten;
     push([], [rd({ uid: 'r3', seq: 4, depthFt: 7, updatedAt: T2 }), rd({ uid: 'new', seq: 9 })]);
-    expect(R.rowsWritten - before).toBe(2); // one changed row + one appended row
+    expect(R.rowsWritten - before).toBe(3); // the hand-edited row (0.6.0: picked up), one changed row + one appended row
     const o = R.objects();
     expect(o[1].Notes).toBe('hand note');
+    expect(pull().readings.find((r: ReadingRec) => r.uid === 'r1')!.notes).toBe('hand note');
     expect(o[3]['Depth to Top of Water (ft)']).toBe(7);
     expect(R.formulas.get(`4,${hd.length}`)).toBe('=1+1');
     expect(o.map((x) => x['Checked by'])).toEqual(['ok 1', 'ok 2', '#FORMULA', 'ok 4', 'ok 5', '']);
     expect(o[5]['Reading UID']).toBe('new');
-    // a delete blanks only our columns in that row
+    // 0.6.0: a delete removes the whole row (the table has no blank rows)
     push([], [], [{ uid: 'r0', kind: 'reading', deletedAt: T3 }]);
-    expect(R.objects()[0]).toMatchObject({ 'Reading UID': '', 'Checked by': 'ok 1' });
+    expect(R.objects().map((x) => x['Reading UID'])).toEqual(['r1', 'r2', 'r3', 'r4', 'new']);
+    expect(R.objects()[0]).toMatchObject({ 'Checked by': 'ok 2' });
     expect(pull().readings.map((r: ReadingRec) => r.uid).sort()).toEqual(['new', 'r1', 'r2', 'r3', 'r4']);
   });
   it('#4 a push that dies part-way is completed by the retry with the same end state; batches are capped', () => {
@@ -254,7 +256,7 @@ describe('Apps Script: 0.4.1 hardening', () => {
     T.getRange(1, 1, 1, 5).setValues([['Kind', 'UID', 'Deleted At', 'Merged Into', 'Rev']]);
     T.getRange(2, 1, 1, 5).setValues([['reading', 'r1', T2, '', 1]]);
     push([bh()], [rd({ updatedAt: T3 })]);
-    expect(sheet('Tombstones').data[0]).toEqual(['Kind', 'UID', 'Deleted At', 'Merged Into', 'Rev', 'Restored At']);
+    expect(sheet('Tombstones').data[0]).toEqual(['Kind', 'UID', 'Deleted At', 'Merged Into', 'Rev', 'Restored At', 'Source']);
     expect(sheet('Tombstones').objects()[0]['Restored At']).not.toBe('');
   });
 });

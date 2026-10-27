@@ -12,6 +12,8 @@ const later = (iso: string) => { const n = new Date().toISOString(); return n > 
 export class MockAdapter implements SyncAdapter {
   readonly kind = 'mock';
   rev = 0;
+  /** 0.6.0: the sheet's Reading ID sequence (never reused). */
+  numMax = 0;
   b = new Map<string, BoreholeRec & { rev: number }>();
   r = new Map<string, ReadingRec & { rev: number }>();
   t = new Map<string, TombRec & { rev: number }>();
@@ -70,7 +72,10 @@ export class MockAdapter implements SyncAdapter {
       if (this.dead(r.boreholeUid)) { held.push({ key, reason: 'Its borehole was deleted on another phone; this phone will restore it' }); continue; }
       if (!this.b.has(r.boreholeUid)) { held.push({ key, reason: 'Its borehole is not on the sheet yet' }); continue; }
       const cur = this.r.get(r.uid);
-      const m = cur ? mergeReading(cur, r) : r;
+      // 0.6.0: the server numbers new readings (the phone's number is only provisional) and keeps the number after.
+      const m = cur ? { ...mergeReading(cur, r), num: cur.num, datetime: cur.datetime, referencePoint: cur.referencePoint, refElevationFt: cur.refElevationFt, userCode: cur.userCode }
+        : { ...r, num: ++this.numMax };
+      if (m.num) m.displayId = String(m.num);
       if (!cur || m.updatedAt !== cur.updatedAt) this.r.set(r.uid, { ...m, rev: ++this.rev });
       acked.push(key);
     }
@@ -79,7 +84,7 @@ export class MockAdapter implements SyncAdapter {
   async pull(since: number): Promise<PullResult> {
     this.gate('pull');
     const strip = <T extends { rev: number }>(m: Map<string, T>) => [...m.values()].filter((v) => v.rev > since).map(({ rev: _r, ...v }) => v);
-    return { cursor: this.rev, boreholes: strip(this.b) as BoreholeRec[], readings: strip(this.r) as ReadingRec[], tombstones: strip(this.t) as TombRec[] };
+    return { cursor: this.rev, boreholes: strip(this.b) as BoreholeRec[], readings: strip(this.r) as ReadingRec[], tombstones: strip(this.t) as TombRec[], numMax: this.numMax };
   }
   async status(): Promise<AdapterStatus> { return { ok: true, message: 'Mock connected' }; }
 }

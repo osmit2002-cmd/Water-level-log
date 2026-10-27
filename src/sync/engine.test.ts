@@ -65,7 +65,7 @@ describe('outbox queue', () => {
       await db.saveBorehole(bh('MW-1'));
       await db.addReading(rd('MW-1', 1, 'OD'));
       await db.addReading(rd('MW-1', 2, 'JD'));
-      expect((await db.allReadings()).map(displayId)).toEqual(['OD-0001', 'JD-0002']);
+      expect((await db.allReadings()).map(displayId)).toEqual(['1', '2']);
     });
   });
   it('items leave the queue only after the server acknowledges them, and a newer edit made during sync stays', async () => {
@@ -105,7 +105,8 @@ describe('two phones through the real Apps Script logic', () => {
     await on(A, () => syncOnce(sa));
     const a1 = await on(A, snapshot), b1 = await on(B, snapshot);
     expect(a1).toEqual(b1);
-    expect(a1.r.map((r) => r[4])).toEqual(expect.arrayContaining(['OD-0001', 'JD-0001']));
+    expect(a1.r.map((r) => r[4]).sort()).toEqual(['1', '2']); // 0.6.0: B's reading also showed 1 offline; the sheet made it 2
+    expect(a1.r.find((r) => r[2] === 20)![4]).toBe('2');
 
     // Both offline: A renames MW-1, B changes its reference elevation; both create "MW-3" independently.
     sa.offline = sb.offline = true;
@@ -135,18 +136,18 @@ describe('two phones through the real Apps Script logic', () => {
     expect(bs.find((b) => b.name === 'mw-3')!.flag).toMatch(/two phones/);
     expect(a2.r.filter((r) => r[1] === 'mw-3')).toHaveLength(2); // readings from both phones land on the merged borehole
     // The reading saved before the elevation change keeps its snapshot.
-    expect(a2.r.find((r) => r[4] === 'OD-0001')![3]).toBe(100);
+    expect(a2.r.find((r) => r[4] === '1')![3]).toBe(100);
     expect(await on(A, db.outboxCount)).toBe(0);
     expect(await on(B, db.outboxCount)).toBe(0);
 
     // Tombstone: B deletes OD-0001; A's offline edit is OLDER than the delete, so it stays deleted everywhere.
-    await on(B, async () => { const r = (await db.allReadings()).find((x) => displayId(x) === 'OD-0001')!; await db.deleteReading(r.id); await syncOnce(sb); });
-    await on(A, async () => { const r = (await db.allReadings()).find((x) => displayId(x) === 'OD-0001')!; await db.updateReading({ ...r, depthFt: 99, updatedAt: T(-600) }); await syncOnce(sa); await syncOnce(sa); });
+    await on(B, async () => { const r = (await db.allReadings()).find((x) => displayId(x) === '1')!; await db.deleteReading(r.id); await syncOnce(sb); });
+    await on(A, async () => { const r = (await db.allReadings()).find((x) => displayId(x) === '1')!; await db.updateReading({ ...r, depthFt: 99, updatedAt: T(-600) }); await syncOnce(sa); await syncOnce(sa); });
     await on(B, () => syncOnce(sb));
     const a3 = await on(A, snapshot), b3 = await on(B, snapshot);
     expect(a3).toEqual(b3);
-    expect(a3.r.map((r) => r[4])).not.toContain('OD-0001');
-    expect(env.ss.getSheetByName('Readings')!.objects().map((r) => r['Reading ID'])).not.toContain('OD-0001');
+    expect(a3.r.map((r) => r[4])).not.toContain('1');
+    expect(env.ss.getSheetByName('Readings')!.objects().map((r) => r['Reading ID'])).not.toContain(1);
 
     // Deleting a borehole whose readings the deleting phone had all seen removes them on the other phone (each has its own tombstone).
     await on(A, async () => { await db.deleteBorehole('MW-2'); await syncOnce(sa); });
@@ -179,7 +180,7 @@ describe('review fixes (0.4.0)', () => {
     await on(a2, async () => {
       await syncOnce(new CodeGsAdapter(env));
       await db.addReading(rd('MW-1', 12));
-      expect((await db.allReadings()).map(displayId).sort()).toEqual(['OD-0001', 'OD-0002', 'OD-0003']);
+      expect((await db.allReadings()).map(displayId).sort()).toEqual(['1', '2', '3']);
     });
   });
 });
@@ -492,6 +493,6 @@ describe('0.4.1 hardening (two phones, real Code.gs)', () => {
     expect(sheetRows(env, 'Readings').map((r) => r['Depth to Top of Water (ft)']).sort()).toEqual([10, 20, 30]);
     const a = await on(A, snapshot);
     expect(a.r).toHaveLength(3);
-    expect(a.r.map((r) => r[4]).sort()).toEqual(['OD-0001', 'OD-0002', 'OD-0099']);
+    expect(a.r.map((r) => r[4]).sort()).toEqual(['1', '2', '3']);
   });
 });

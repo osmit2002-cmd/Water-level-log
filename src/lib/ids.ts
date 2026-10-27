@@ -11,11 +11,9 @@ export function uuid(): string {
 }
 
 /**
- * Display Reading ID: USERCODE-0001 (User Code at save + that phone's running number, at least 4 digits).
- * Readings saved before 0.4.0 keep their old number as the running number; readings without a User Code
- * (saved before 0.3.0) use the prefix LEGACY-.
+ * 0.6.0 display Reading ID: just the number (1, 2, 3...). Shared readings are numbered by the sheet (one sequence for the
+ * whole team, never reused); a new reading shows a provisional number until it syncs. The uid stays the sync key.
  */
-export function displayId(r: Pick<Reading, 'userCode' | 'seq' | 'id'>): string {
-  const n = r.seq ?? r.id;
-  return `${r.userCode || 'LEGACY'}-${String(n).padStart(4, '0')}`;
+export function displayId(r: Pick<Reading, 'num' | 'seq' | 'id'>): string {
+  return String(r.num ?? r.seq ?? r.id);
 }

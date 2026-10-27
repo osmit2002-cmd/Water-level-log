@@ -176,7 +176,7 @@ describe('Shared -> Local (make a local copy)', () => {
       expect(name).toBe('MW-1 (local)');
       expect(await db.makeLocalCopy('MW-1', name, true, 'ZZ')).toEqual({ name, readings: 2 });
       const copies = (await db.allReadings()).filter((r) => r.borehole === name);
-      expect(copies.map((r) => displayId(r)).sort()).toEqual(['ZZ-0003', 'ZZ-0004']); // this phone's own range
+      expect(copies.map((r) => displayId(r)).sort()).toEqual(['3', '4']); // 0.6.0: next numbers on this phone
       expect(copies.every((r) => r.notes?.startsWith('Copy of '))).toBe(true);
       expect(await db.outboxCount()).toBe(0);
       expect(await names()).toEqual(['MW-1 (local):local', 'MW-1:shared:hidden']);
