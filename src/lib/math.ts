@@ -1,4 +1,4 @@
-import type { Reading, Unit } from './types';
+import type { Reading, Scope, Unit } from './types';
 
 export const FT_PER_M = 1 / 0.3048;
 
@@ -32,6 +32,8 @@ export function waterElevationFt(r: Pick<Reading, 'depthFt' | 'refElevationFt'>)
 
 export interface DerivedReading extends Reading {
   waterElevFt: number;
+  /** 0.5.0: the scope of the reading's borehole (readings follow their borehole). */
+  scope?: Scope;
 }
 
 export function compareReadings(a: Reading, b: Reading): number {
@@ -39,8 +41,8 @@ export function compareReadings(a: Reading, b: Reading): number {
 }
 
 /** Readings in date/time order (Reading ID breaks ties) with computed water elevation. */
-export function deriveReadings(readings: Reading[]): DerivedReading[] {
-  return [...readings].sort(compareReadings).map((r) => ({ ...r, waterElevFt: waterElevationFt(r) }));
+export function deriveReadings(readings: Reading[], scopes?: Map<string, Scope>): DerivedReading[] {
+  return [...readings].sort(compareReadings).map((r) => ({ ...r, waterElevFt: waterElevationFt(r), ...(scopes ? { scope: scopes.get(r.borehole) ?? 'shared' } : {}) }));
 }
 
 export function latestPerBorehole(derived: DerivedReading[]): Map<string, DerivedReading> {

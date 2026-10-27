@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useStore } from '../store';
 import { deleteBorehole, findName, getBoreholeByUid, saveBorehole } from '../lib/db';
 import { applyMine, staleBorehole, type Stale } from '../lib/conflict';
-import type { Borehole } from '../lib/types';
+import type { Borehole, Scope } from '../lib/types';
+import { scopeOf } from '../lib/types';
+import { loadScope, RD_SCOPE, ScopeBadge, ScopeSwitch } from '../Scope';
 import { fmt2, fromUnit, parseDecimal, toUnit } from '../lib/math';
 
 /** Like ReadingForm: keeps the version it opened with and checks it on Save (fix #6). */
@@ -21,6 +23,10 @@ function Form({ old, rebase }: { old?: Borehole; rebase: (b: Borehole) => void }
   const { bhMap, readings, settings, reload } = useStore();
   const u = settings.unit;
   const nav = useNavigate();
+  const [qs] = useSearchParams();
+  const q = qs.get('scope');
+  // 0.5.0: a new borehole is Local or Shared (default: what was asked for, else the New Reading tab's last choice).
+  const [scope, setScope] = useState<Scope>(old ? scopeOf(old) : q === 'local' || q === 'shared' ? q : loadScope(RD_SCOPE, ['local', 'shared'] as const, 'shared'));
   const [conflict, setConflict] = useState<{ st: NonNullable<Stale>; cur?: Borehole; mine: Pick<Borehole, 'name' | 'referencePoint' | 'refElevationFt'> }>();
   const n2 = (ft?: number) => (ft == null ? '' : fmt2(toUnit(ft, u)));
   const [f, setF] = useState({ name: old?.name ?? '', referencePoint: old?.referencePoint ?? 'top of casing', elev: n2(old?.refElevationFt) });
@@ -56,7 +62,7 @@ function Form({ old, rebase }: { old?: Borehole; rebase: (b: Borehole) => void }
     const next = cur && old ? applyMine(old, cur, mine) : { ...old, ...mine };
     setSaving(true);
     try {
-      await saveBorehole({ ...next, createdAt: old?.createdAt ?? now, updatedAt: now }, conflict?.st.kind === 'deleted' ? undefined : curName);
+      await saveBorehole({ ...next, ...(old ? {} : { scope }), createdAt: old?.createdAt ?? now, updatedAt: now }, conflict?.st.kind === 'deleted' ? undefined : curName);
     } catch (x) { setSaving(false); return setErr((x as Error).message); }
     await reload();
     nav(`/borehole/${encodeURIComponent(next.name)}`, { replace: true });
@@ -71,7 +77,16 @@ function Form({ old, rebase }: { old?: Borehole; rebase: (b: Borehole) => void }
 
   return (
     <form onSubmit={save} className="form">
-      <h2>{old ? `Edit ${old.name}` : 'New borehole'}</h2>
+      <h2>{old ? `Edit ${old.name}` : `New ${scope === 'local' ? 'Local' : 'Shared'} borehole`}</h2>
+      {old ? (
+        <p className="scope-row" data-testid="bh-scope-ro"><ScopeBadge scope={scope} long /> <span className="muted small">Change it on the borehole page.</span></p>
+      ) : (
+        <>
+          <ScopeSwitch label="New borehole scope" value={scope} options={['local', 'shared'] as const} onChange={setScope} testid="bh-scope" />
+          <p className="scope-row" data-testid="bh-scope-note"><ScopeBadge scope={scope} long />
+            <span className="muted small">{scope === 'local' ? 'Stays on this phone. Never uploaded; you can share it later.' : 'Uploaded to the team sheet (when sync is on), with its readings.'}</span></p>
+        </>
+      )}
       <label>Borehole Name *<input value={f.name} onChange={set('name')} autoCapitalize="characters" data-testid="bh-name" required /></label>
       {old && f.name.trim() !== old.name && <p className="muted small" data-testid="bh-rename-note">Renaming also updates the Borehole Name on its {count} reading(s).</p>}
       <label>Reference Point<input value={f.referencePoint} onChange={set('referencePoint')} list="refpoints" data-testid="bh-refpoint" /></label>

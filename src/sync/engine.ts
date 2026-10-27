@@ -1,4 +1,4 @@
-import { getCursor, outboxAck, outboxAll, outboxFail, outboxLinkFailures } from '../lib/db';
+import { getCursor, outboxPurgeLocal, outboxAck, outboxAll, outboxFail, outboxLinkFailures } from '../lib/db';
 import type { BoreholeRec, ItemNote, ReadingRec, TombRec } from './types';
 import type { SyncAdapter } from './types';
 import { applyPull } from './apply';
@@ -19,6 +19,7 @@ export async function syncOnce(adapter: SyncAdapter): Promise<SyncRun> {
   const run: SyncRun = { pushed: 0, acked: 0, pulled: 0, changed: 0, rejected: [], held: [] };
   const syncId = `${Date.now()}-${Math.random()}`;
   for (let round = 0; round < MAX_ROUNDS; round++) {
+    await outboxPurgeLocal(); // 0.5.0: Local boreholes and their readings never leave this phone
     await outboxLinkFailures();
     const items = (await outboxAll()).filter((x) => !x.failed);
     const rank = (x: (typeof items)[number]) => (x.kind === 'tombstone' ? ((x.rec as TombRec).kind === 'reading' ? 0 : 1) : x.kind === 'borehole' ? 2 : 3);

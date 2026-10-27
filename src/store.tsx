@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { Borehole, Reading, Settings } from './lib/types';
-import { normalizeSettings } from './lib/types';
+import { normalizeSettings, scopeOf } from './lib/types';
 import { allBoreholes, allReadings, requestPersist } from './lib/db';
 import { deriveReadings, type DerivedReading } from './lib/math';
 
@@ -48,7 +48,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [settings.theme]);
   const value = useMemo<Store>(() => ({
     ready, loadError, boreholes, readings, settings, persisted, setSettings, reload,
-    bhMap: new Map(boreholes.map((b) => [b.name, b])), derived: deriveReadings(readings)
+    bhMap: new Map(boreholes.map((b) => [b.name, b])), derived: deriveReadings(readings, new Map(boreholes.map((b) => [b.name, scopeOf(b)])))
   }), [ready, loadError, boreholes, readings, settings, persisted, setSettings, reload]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

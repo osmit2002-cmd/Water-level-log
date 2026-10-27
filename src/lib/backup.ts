@@ -96,6 +96,10 @@ export function validateBackup(x: unknown): RestoreResult {
       const ft = rec(r.fieldTimes);
       const times = Object.fromEntries(BOREHOLE_FIELDS.filter((f) => typeof ft[f] === 'string').map((f) => [f, ft[f] as string]));
       if (Object.keys(times).length) b.fieldTimes = times;
+      // 0.5.0: scope travels with the backup. Missing (backups from before 0.5.0) = shared.
+      if (!(r.scope === undefined || r.scope === null || r.scope === 'local' || r.scope === 'shared') || !(r.hidden === undefined || r.hidden === null || typeof r.hidden === 'boolean')) fail(`Borehole ${name}: bad scope`);
+      if (r.scope === 'local') b.scope = 'local';
+      else if (r.hidden === true) b.hidden = true;
     }
     return b;
   });

@@ -1,6 +1,6 @@
 import { displayId } from './ids';
 import type { Borehole, ColumnKey, Columns, Unit } from './types';
-import { COLUMNS } from './types';
+import { COLUMNS, SCOPE_LABEL, scopeOf } from './types';
 import type { DerivedReading } from './math';
 import { fmt2, fromUnit, parseDecimal, toUnit } from './math';
 
@@ -64,6 +64,7 @@ export function columnLabel(c: ColumnKey, u: Unit): string {
     case 'depth': return `Depth to Top of Water (${u})`;
     case 'waterElevation': return `Water Elevation (${u})`;
     case 'notes': return 'Notes';
+    case 'scope': return 'Scope';
   }
 }
 export const enabledColumns = (cols: Columns): ColumnKey[] => COLUMNS.filter((c) => cols[c]);
@@ -85,6 +86,7 @@ function readingCell(r: DerivedReading, c: ColumnKey, u: Unit): string {
     case 'depth': return L(r.depthFt);
     case 'waterElevation': return L(r.waterElevFt);
     case 'notes': return textCell(r.notes);
+    case 'scope': return SCOPE_LABEL[r.scope ?? 'shared'];
   }
 }
 
@@ -94,14 +96,15 @@ export function readingsCsv(readings: DerivedReading[], u: Unit, cols: Columns):
 }
 
 export function boreholesHeader(u: Unit): string[] {
-  return ['Borehole Name', 'Reference Point', `Reference Elevation (${u})`];
+  return ['Borehole Name', 'Reference Point', `Reference Elevation (${u})`, 'Scope'];
 }
 export function boreholesCsv(list: Borehole[], u: Unit): string {
-  return toCsv([boreholesHeader(u), ...list.map((b) => [textCell(b.name), textCell(b.referencePoint), numCell(toUnit(b.refElevationFt, u))])]);
+  return toCsv([boreholesHeader(u), ...list.map((b) => [textCell(b.name), textCell(b.referencePoint), numCell(toUnit(b.refElevationFt, u)), SCOPE_LABEL[scopeOf(b)]])]);
 }
 
 /** A borehole row from an import. referencePoint is only set when that column exists (absent columns keep existing values). */
-export type BoreholePatch = Pick<Borehole, 'name' | 'refElevationFt'> & Partial<Pick<Borehole, 'referencePoint'>>;
+/** scope (0.5.0) is only used for boreholes the import creates; an import never converts an existing borehole. */
+export type BoreholePatch = Pick<Borehole, 'name' | 'refElevationFt'> & Partial<Pick<Borehole, 'referencePoint' | 'scope'>>;
 
 export interface ImportResult {
   rows: BoreholePatch[];
@@ -120,6 +123,7 @@ export function parseBoreholesCsv(text: string, fallback: Unit): ImportResult {
   const find = (...names: string[]) => names.map((n) => h.indexOf(n)).find((i) => i >= 0) ?? -1;
   const iName = find('borehole_name', 'borehole', 'name');
   const iRp = find('reference_point');
+  const iScope = find('scope');
   let iElev = -1, elevUnit: Unit = fallback;
   for (const [n, u] of [['reference_elevation_ft', 'ft'], ['reference_elevation_m', 'm'], ['reference_elevation', fallback], ['elevation', fallback]] as const) {
     if (iElev < 0 && h.indexOf(n) >= 0) { iElev = h.indexOf(n); elevUnit = u; }
@@ -138,6 +142,7 @@ export function parseBoreholesCsv(text: string, fallback: Unit): ImportResult {
     if (!Number.isFinite(elev)) return out.errors.push({ line, message: `${name}: reference elevation "${get(iElev)}" is not a number` });
     const row: BoreholePatch = { name, refElevationFt: fromUnit(elev, elevUnit) };
     if (iRp >= 0) row.referencePoint = get(iRp) || 'top of casing';
+    if (iScope >= 0 && get(iScope).toLowerCase() === 'local') row.scope = 'local';
     const key = name.toLowerCase();
     if (seen.has(key)) out.errors.push({ line, message: `${name}: duplicate of line ${seen.get(key)}; last row wins` });
     seen.set(key, line);

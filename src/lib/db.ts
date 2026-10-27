@@ -1,6 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase, type IDBPTransaction, type StoreNames } from 'idb';
-import type { Borehole, BoreholeField, Reading } from './types';
-import { BOREHOLE_FIELDS } from './types';
+import type { Borehole, BoreholeField, Reading, Scope } from './types';
+import { BOREHOLE_FIELDS, scopeOf } from './types';
 import type { BoreholePatch } from './csv';
 import { migrateV1, type V1Borehole, type V1Reading } from './migrate';
 import { displayId, uuid } from './ids';
@@ -28,8 +28,10 @@ interface WLSchema extends DBSchema {
   readings: { key: number; value: Reading; indexes: { byBorehole: string; byUid: string } };
   meta: { key: string; value: { key: string; value: unknown } };
   outbox: { key: string; value: OutboxItem };
-  tombstones: { key: string; value: TombRec };
+  tombstones: { key: string; value: LocalTomb };
 }
+/** A tombstone as stored on this phone. `localOnly` (0.5.0): the deleted record was Local, so the delete is never sent. */
+export type LocalTomb = TombRec & { localOnly?: boolean };
 export const DB_NAME = 'water-level-log';
 export const DB_VERSION = 3;
 const NEXT_ID = 'nextReadingId'; // internal local key counter
@@ -118,6 +120,8 @@ export function toRRec(r: Reading): ReadingRec {
 // ---- outbox / tombstones (inside a caller's transaction) ----
 const ver = () => `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 async function queue(tx: Tx, kind: OutboxItem['kind'], rec: OutboxItem['rec']) {
+  // 0.5.0: Local boreholes and their readings never enter the outbox (checked here, so every caller is covered).
+  if (await isLocalRec(tx, kind, rec)) return;
   const key = `${kind[0]}:${rec.uid}`;
   await tx.objectStore('outbox').put({ key, kind, rec, ver: ver() });
   queued();
@@ -130,10 +134,20 @@ function queued() {
   queuedPending = true;
   setTimeout(() => { queuedPending = false; window.dispatchEvent(new Event(QUEUED_EVENT)); }, 0);
 }
-async function tombstone(tx: Tx, t: TombRec, push = true) {
+async function tombstone(tx: Tx, t: LocalTomb, push = true) {
   await tx.objectStore('tombstones').put(t);
   await tx.objectStore('outbox').delete(`${t.kind[0]}:${t.uid}`);
-  if (push) await queue(tx, 'tombstone', t);
+  if (push && !t.localOnly) await queue(tx, 'tombstone', t);
+}
+/** True when `uid` is a Local borehole on this phone. */
+async function isLocalBh(tx: Tx, uid: string | undefined): Promise<boolean> {
+  if (!uid) return false;
+  return scopeOf(await tx.objectStore('boreholes').index('byUid').get(uid)) === 'local';
+}
+async function isLocalRec(tx: Tx, kind: OutboxItem['kind'], rec: OutboxItem['rec']): Promise<boolean> {
+  if (kind === 'borehole') return isLocalBh(tx, rec.uid);
+  if (kind === 'reading') return isLocalBh(tx, (rec as ReadingRec).boreholeUid);
+  return !!(await tx.objectStore('tombstones').get(rec.uid))?.localOnly;
 }
 export const RESTORED_FOR_EDIT = 'Deleted on another phone, but a reading in it was edited on this phone afterwards, so it was brought back. Check the reference values.';
 async function bhUid(tx: Tx, name: string, from?: Reading): Promise<{ uid: string; name: string }> {
@@ -153,7 +167,8 @@ async function bhUid(tx: Tx, name: string, from?: Reading): Promise<{ uid: strin
     // reading's snapshot instead of failing. Same uid, edited now (after the delete), so the sheet restores it too.
     const now = new Date().toISOString();
     const uid = from.boreholeUid ?? uuid();
-    b = { name, uid, referencePoint: from.referencePoint, refElevationFt: from.refElevationFt, createdAt: now, updatedAt: now, flag: RESTORED_FOR_EDIT,
+    const wasLocal = !!(await tx.objectStore('tombstones').get(uid))?.localOnly; // 0.5.0: a Local borehole comes back Local
+    b = { name, uid, ...(wasLocal ? { scope: 'local' as Scope } : {}), referencePoint: from.referencePoint, refElevationFt: from.refElevationFt, createdAt: now, updatedAt: now, flag: RESTORED_FOR_EDIT,
       fieldTimes: { name: now, referencePoint: now, refElevationFt: now, flag: now } };
     await tx.objectStore('boreholes').put(b);
     if (await tx.objectStore('tombstones').getKey(uid)) { await tx.objectStore('tombstones').delete(uid); await tx.objectStore('outbox').delete(`t:${uid}`); }
@@ -229,8 +244,9 @@ export async function deleteReading(id: number) {
   const tx = await rw(ALL);
   const r = await tx.objectStore('readings').get(id);
   if (r) {
+    const local = await isLocalBh(tx, r.boreholeUid);
     await tx.objectStore('readings').delete(id);
-    if (r.uid) await tombstone(tx, { uid: r.uid, kind: 'reading', deletedAt: new Date().toISOString() });
+    if (r.uid) await tombstone(tx, { uid: r.uid, kind: 'reading', deletedAt: new Date().toISOString(), ...(local ? { localOnly: true } : {}) });
   }
   await tx.done;
 }
@@ -246,6 +262,9 @@ function stampFields(old: Borehole | undefined, b: Borehole, now: string): Boreh
   const o = old ? fillBorehole(old) : undefined;
   // A form that does not carry the flag keeps the existing one (and its time).
   const nb: Borehole = { ...b, uid: o?.uid ?? b.uid ?? uuid(), flag: b.flag ?? o?.flag ?? '' };
+  // 0.5.0: scope and hidden are this phone's own settings; an edit never changes them (conversions have their own functions).
+  if (o) { if (o.scope) nb.scope = o.scope; else delete nb.scope; if (o.hidden) nb.hidden = true; else delete nb.hidden; }
+  else if (nb.scope !== 'local') delete nb.scope;
   const ft: Partial<Record<BoreholeField, string>> = { ...o?.fieldTimes };
   for (const f of BOREHOLE_FIELDS) if (!o || (o[f] ?? '') !== (nb[f] ?? '')) ft[f] = now;
   return { ...nb, fieldTimes: ft };
@@ -284,13 +303,14 @@ export async function deleteBorehole(name: string) {
   const tx = await rw(ALL);
   const rs = tx.objectStore('readings');
   const now = new Date().toISOString();
+  const b = await tx.objectStore('boreholes').get(name);
+  const lo = scopeOf(b) === 'local' ? { localOnly: true } : {};
   for (const r of await rs.index('byBorehole').getAll(name)) {
     await rs.delete(r.id);
-    if (r.uid) await tombstone(tx, { uid: r.uid, kind: 'reading', deletedAt: now }); // sent too, in case the sheet already merged this borehole
+    if (r.uid) await tombstone(tx, { uid: r.uid, kind: 'reading', deletedAt: now, ...lo }); // sent too, in case the sheet already merged this borehole
   }
-  const b = await tx.objectStore('boreholes').get(name);
   await tx.objectStore('boreholes').delete(name);
-  if (b?.uid) await tombstone(tx, { uid: b.uid, kind: 'borehole', deletedAt: now });
+  if (b?.uid) await tombstone(tx, { uid: b.uid, kind: 'borehole', deletedAt: now, ...lo });
   await tx.done;
 }
 
@@ -309,7 +329,8 @@ export async function upsertBoreholes(list: BoreholePatch[]) {
       ...old,
       name: old?.name ?? p.name, referencePoint: p.referencePoint ?? old?.referencePoint ?? 'top of casing', // Keep the stored value when the CSV only differs by export rounding (2 dp in ft or m), so a round trip changes nothing.
       refElevationFt: old && Math.abs(old.refElevationFt - p.refElevationFt) < 0.017 ? old.refElevationFt : p.refElevationFt,
-      createdAt: old?.createdAt ?? now, updatedAt: now
+      createdAt: old?.createdAt ?? now, updatedAt: now,
+      ...(!old && p.scope === 'local' ? { scope: 'local' as Scope } : {})
     }, now);
     if (old && JSON.stringify(toBRec(fillBorehole(old))) === JSON.stringify(toBRec({ ...b, updatedAt: old.updatedAt }))) continue;
     await store.put(b);
@@ -368,7 +389,7 @@ export async function queueEverything() {
     if (!r.uid || !r.boreholeUid) continue;
     if (!(await tx.objectStore('outbox').getKey(`r:${r.uid}`))) await queue(tx, 'reading', toRRec(r));
   }
-  for (const t of await tx.objectStore('tombstones').getAll()) if (!t.mergedInto && !(await tx.objectStore('outbox').getKey(`t:${t.uid}`))) await queue(tx, 'tombstone', t);
+  for (const t of await tx.objectStore('tombstones').getAll()) if (!t.mergedInto && !t.localOnly && !(await tx.objectStore('outbox').getKey(`t:${t.uid}`))) await queue(tx, 'tombstone', t);
   await tx.done;
 }
 
@@ -470,13 +491,14 @@ export async function adoptRemoteIds(p: PullResult): Promise<{ boreholes: number
     for (const rb of p.boreholes) {
       const k = findName(await bs.getAllKeys(), rb.name);
       const lb = k ? await bs.get(k) : undefined;
-      if (!lb || lb.uid === rb.uid || (lb.uid && remoteB.has(lb.uid))) continue;
+      if (!lb || lb.uid === rb.uid || (lb.uid && remoteB.has(lb.uid)) || scopeOf(lb) === 'local') continue; // 0.5.0: a Local borehole is never matched to the sheet
       if (lb.uid) await ob.delete(`b:${lb.uid}`);
       await bs.put({ ...fillBorehole(lb), uid: rb.uid });
       for (const r of await rs.index('byBorehole').getAll(lb.name)) { await rs.put({ ...r, boreholeUid: rb.uid }); await ob.delete(`r:${r.uid}`); } // re-queued with the new link
       nb++;
     }
-    const all = await rs.getAll();
+    const localNames = new Set((await bs.getAll()).filter((b) => scopeOf(b) === 'local').map((b) => b.name));
+    const all = (await rs.getAll()).filter((r) => !localNames.has(r.borehole));
     const used = new Set<number>();
     for (const rr of p.readings) {
       if (all.some((r) => r.uid === rr.uid)) continue;
@@ -493,6 +515,98 @@ export async function adoptRemoteIds(p: PullResult): Promise<{ boreholes: number
     await tx.done;
   } catch (e) { try { tx.abort(); } catch { /* done */ } throw e; }
   return { boreholes: nb, readings: nr };
+}
+
+// ---- 0.5.0: Local / Shared boreholes ----
+
+/** Drop queued items that belong to Local boreholes (a safety net run before every push; normally there are none). */
+export async function outboxPurgeLocal(): Promise<number> {
+  const tx = await rw(ALL);
+  let n = 0;
+  for (const it of await tx.objectStore('outbox').getAll()) {
+    if (await isLocalRec(tx, it.kind, it.rec)) { await tx.objectStore('outbox').delete(it.key); n++; }
+  }
+  await tx.done;
+  return n;
+}
+
+/** A free name like "MW-1 (local)", "MW-1 (local 2)"... (case-insensitive, like every borehole name). */
+export function localCopyName(names: Iterable<string>, base: string): string {
+  const list = [...names];
+  for (let i = 1; ; i++) {
+    const n = `${base} (local${i > 1 ? ` ${i}` : ''})`;
+    if (!findName(list, n)) return n;
+  }
+}
+
+/**
+ * Local -> Shared. The borehole keeps its uid and its readings keep theirs; the borehole is queued first, then every
+ * reading (the engine always pushes boreholes before readings, so no reading reaches the sheet before its borehole).
+ * Returns how many readings were queued.
+ */
+export async function shareBorehole(name: string): Promise<number> {
+  const tx = await rw(ALL);
+  try {
+    const b = await tx.objectStore('boreholes').get(name);
+    if (!b) throw new Error(`Borehole ${name} no longer exists`);
+    if (scopeOf(b) !== 'local') { await tx.done; return 0; }
+    const { scope: _s, hidden: _h, ...rest } = fillBorehole(b);
+    const shared: Borehole = rest;
+    await tx.objectStore('boreholes').put(shared);
+    await queue(tx, 'borehole', toBRec(shared));
+    let n = 0;
+    for (const r of await tx.objectStore('readings').index('byBorehole').getAll(name)) {
+      const full = { ...r, uid: r.uid ?? uuid(), boreholeUid: shared.uid };
+      if (full.uid !== r.uid || full.boreholeUid !== r.boreholeUid) await tx.objectStore('readings').put(full);
+      await queue(tx, 'reading', toRRec(full));
+      n++;
+    }
+    // Deletes made while it was Local stay on this phone only (the sheet never had those records).
+    await tx.done;
+    return n;
+  } catch (e) { try { tx.abort(); } catch { /* done */ } throw e; }
+}
+
+/**
+ * Shared -> Local, without touching the sheet: fork a NEW Local borehole (new uid) with a copy of every reading
+ * (new uids, same date/time, depth, User Code and running number). The shared borehole stays exactly as it is and keeps
+ * syncing, so nothing is deleted anywhere and the next pull cannot bring a duplicate back. `hideShared` hides the shared
+ * one on this phone only. Returns the new borehole's name and how many readings were copied.
+ */
+export async function makeLocalCopy(name: string, newName: string, hideShared = false): Promise<{ name: string; readings: number }> {
+  const tx = await rw(ALL);
+  try {
+    const bs = tx.objectStore('boreholes'), rs = tx.objectStore('readings'), meta = tx.objectStore('meta');
+    const src = await bs.get(name);
+    if (!src) throw new Error(`Borehole ${name} no longer exists`);
+    const nn = newName.trim();
+    if (!nn) throw new Error('Enter a name for the local copy');
+    const clash = findName(await bs.getAllKeys(), nn);
+    if (clash) throw new Error(`A borehole named ${clash} already exists`);
+    const now = new Date().toISOString();
+    const copy: Borehole = { name: nn, uid: uuid(), scope: 'local', referencePoint: src.referencePoint, refElevationFt: src.refElevationFt, flag: '',
+      createdAt: now, updatedAt: now, fieldTimes: { name: now, referencePoint: now, refElevationFt: now, flag: now } };
+    await bs.put(copy);
+    let id = ((await meta.get(NEXT_ID))?.value as number | undefined) ?? 1;
+    let n = 0;
+    for (const r of await rs.index('byBorehole').getAll(name)) {
+      while (await rs.getKey(id)) id++;
+      await rs.add({ ...r, id, uid: uuid(), borehole: nn, boreholeUid: copy.uid, seq: r.seq ?? r.id });
+      id++; n++;
+    }
+    await meta.put({ key: NEXT_ID, value: id });
+    if (hideShared && scopeOf(src) === 'shared') await bs.put({ ...src, hidden: true });
+    await tx.done;
+    return { name: nn, readings: n };
+  } catch (e) { try { tx.abort(); } catch { /* done */ } throw e; }
+}
+
+/** Hide or show a shared borehole on this phone only. Never queued: the sheet and other phones are not affected. */
+export async function setHidden(name: string, hidden: boolean) {
+  const tx = await rw(['boreholes']);
+  const b = await tx.objectStore('boreholes').get(name);
+  if (b) { const { hidden: _h, ...rest } = b; await tx.objectStore('boreholes').put(hidden ? { ...rest, hidden: true } : rest); }
+  await tx.done;
 }
 
 export async function resetCursor() { await (await db()).put('meta', { key: CURSOR, value: 0 }); }

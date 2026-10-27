@@ -63,7 +63,7 @@ describe('v1 migration', () => {
     expect(m.readings.every((x) => x.userCode === '')).toBe(true);
     expect(m.nextReadingId).toBe(4);
     expect(m.settings.theme).toBe('dark');
-    expect(m.settings.columns).toEqual(ALL_COLUMNS);
+    expect(m.settings.columns).toEqual(DEFAULT_SETTINGS.columns);
   });
   it('keeps names unique even when a name equals another borehole’s ID', () => {
     const m = migrateV1([{ id: 'A', name: 'B', refElevationFt: 1 }, { id: 'B', name: '', refElevationFt: 2 }, { id: 'C', name: 'b', refElevationFt: 3 }], []);
@@ -78,10 +78,10 @@ describe('v1 migration', () => {
 
 describe('settings', () => {
   it('defaults all columns on and never allows all off', () => {
-    expect(normalizeSettings({}).columns).toEqual(ALL_COLUMNS);
-    const off = Object.fromEntries(Object.keys(ALL_COLUMNS).map((k) => [k, false]));
-    expect(normalizeSettings({ columns: off }).columns).toEqual(ALL_COLUMNS);
-    expect(normalizeSettings({ unit: 'yd', theme: 'x', columns: { notes: false, bogus: true } })).toEqual({ unit: 'ft', theme: 'auto', columns: { ...ALL_COLUMNS, notes: false }, userCode: '' });
+    expect(normalizeSettings({}).columns).toEqual(DEFAULT_SETTINGS.columns);
+    const off = Object.fromEntries(Object.keys(DEFAULT_SETTINGS.columns).map((k) => [k, false]));
+    expect(normalizeSettings({ columns: off }).columns).toEqual(DEFAULT_SETTINGS.columns);
+    expect(normalizeSettings({ unit: 'yd', theme: 'x', columns: { notes: false, bogus: true } })).toEqual({ unit: 'ft', theme: 'auto', columns: { ...DEFAULT_SETTINGS.columns, notes: false }, userCode: '' });
   });
 });
 

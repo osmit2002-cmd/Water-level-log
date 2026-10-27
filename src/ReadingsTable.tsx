@@ -19,6 +19,7 @@ export default function ReadingsTable({ rows, unit: u, columns, testid }: { rows
       case 'depth': return fmtLen(r.depthFt, u);
       case 'waterElevation': return <b>{fmtLen(r.waterElevFt, u)}</b>;
       case 'notes': return r.notes ?? '';
+      case 'scope': return r.scope === 'local' ? 'Local' : 'Shared';
     }
   };
   return (

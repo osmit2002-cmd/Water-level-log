@@ -4,7 +4,9 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useStore } from '../store';
 import { addReading, deleteReading, getReading, updateReading } from '../lib/db';
 import { staleReading, type Stale } from '../lib/conflict';
-import type { Reading } from '../lib/types';
+import type { Reading, Scope } from '../lib/types';
+import { scopeOf } from '../lib/types';
+import { inScope, loadScope, RD_SCOPE, saveScope, ScopeBadge, ScopeSwitch } from '../Scope';
 import UserCodeSheet from '../UserCodeSheet';
 import { fmt2, fmtLen, fromUnit, nowLocal, parseDecimal, round2, toUnit } from '../lib/math';
 
@@ -31,8 +33,16 @@ function Form({ old, rebase }: { old?: Reading; rebase: (r: Reading) => void }) 
   const u = settings.unit;
   const nav = useNavigate();
   const [conflict, setConflict] = useState<{ st: NonNullable<Stale>; cur?: Reading }>();
-  const initialBh = old?.borehole ?? qs.get('bh') ?? localStorage.getItem(LAST_BH) ?? '';
-  const [bh, setBh] = useState(bhMap.has(initialBh) ? initialBh : boreholes[0]?.name ?? '');
+  const asked = old?.borehole ?? qs.get('bh') ?? '';
+  // 0.5.0: Local / Shared selector. Opening from a borehole (or editing) follows that borehole; otherwise the last choice.
+  const [scope, setScopeState] = useState<Scope>(bhMap.has(asked) ? scopeOf(bhMap.get(asked)) : loadScope(RD_SCOPE, ['local', 'shared'] as const, 'shared'));
+  const choices = boreholes.filter((x) => inScope(x, scope) || x.name === asked);
+  const pick = (list: typeof boreholes, prefer: string[]) => prefer.find((n) => list.some((x) => x.name === n)) ?? list[0]?.name ?? '';
+  const [bh, setBh] = useState(() => pick(choices, [asked, localStorage.getItem(LAST_BH) ?? '']));
+  const setScope = (v: Scope) => {
+    setScopeState(v); saveScope(RD_SCOPE, v);
+    setBh(pick(boreholes.filter((x) => inScope(x, v)), [localStorage.getItem(LAST_BH) ?? '']));
+  };
   const [depth, setDepth] = useState(old ? fmt2(toUnit(old.depthFt, u)) : '');
   const [notes, setNotes] = useState(old?.notes ?? '');
   const [err, setErr] = useState('');
@@ -95,13 +105,20 @@ function Form({ old, rebase }: { old?: Reading; rebase: (r: Reading) => void }) 
   return (
     <form onSubmit={save} className="form">
       <h2>{old ? `Edit reading ${displayId(old)}` : 'New reading'}</h2>
+      <ScopeSwitch label="Borehole scope" value={scope} options={['local', 'shared'] as const} onChange={setScope} disabled={!!old} testid="rd-scope"
+        counts={old ? undefined : { local: boreholes.filter((x) => inScope(x, 'local')).length, shared: boreholes.filter((x) => inScope(x, 'shared')).length }} />
+      <p className="muted small" data-testid="rd-scope-note">{scope === 'local' ? 'Local: saved on this phone only, never uploaded.' : 'Shared: uploaded to the team sheet when sync is on.'}</p>
+      {!old && !choices.length ? (
+        <p className="empty" data-testid="rd-scope-empty">No {scope === 'local' ? 'Local' : 'Shared'} boreholes yet. <Link to={`/new-borehole?scope=${scope}`}>+ {scope === 'local' ? 'Local' : 'Shared'} borehole</Link></p>
+      ) : (
       <label>Borehole Name
         <select value={bh} onChange={(e) => setBh(e.target.value)} disabled={!!old} data-testid="rd-borehole">
           {old && !bhMap.has(old.borehole) && <option value={old.borehole}>{old.borehole}</option>}
-          {boreholes.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
+          {choices.map((x) => <option key={x.name} value={x.name}>{x.name}</option>)}
         </select>
       </label>
-      {refFt != null && <p className="muted small" data-testid="rd-ref">Reference Point: {refPoint || '—'} · Reference Elevation {fmtLen(refFt, u)} {u}{old && b && old.refElevationFt !== b.refElevationFt ? ' (as recorded for this reading)' : ''}</p>}
+      )}
+      {refFt != null && <p className="muted small" data-testid="rd-ref">Reference Point: {refPoint || '—'} · Reference Elevation {fmtLen(refFt, u)} {u}{old && b && old.refElevationFt !== b.refElevationFt ? ' (as recorded for this reading)' : ''} {b && <ScopeBadge scope={scopeOf(b)} />}</p>}
       <label>Depth to Top of Water ({u} below {refPoint || 'reference point'})
         <input className="huge" inputMode="decimal" value={depth} onChange={(e) => setDepth(e.target.value)} placeholder="0.00" autoFocus={!old} data-testid="rd-depth" />
       </label>

@@ -1,4 +1,5 @@
-import { _putBorehole, _queue, _rw, _tombstone, CURSOR, findName, fromBRec, toBRec, toRRec, type Tx } from '../lib/db';
+import { _putBorehole, _queue, _rw, _tombstone, CURSOR, findName, fromBRec, localCopyName, toBRec, toRRec, type Tx } from '../lib/db';
+import { scopeOf } from '../lib/types';
 import type { Borehole, Reading } from '../lib/types';
 import { mergeBorehole, mergeFlag, mergeReading } from './merge';
 import type { PullResult, ReadingRec, TombRec } from './types';
@@ -26,6 +27,7 @@ const after = (iso: string) => { const n = new Date().toISOString(); return n > 
 const CURSOR_HOLDS = 'syncCursorHolds';
 export const ORPHANS = 'orphanReadings';
 export const MAX_CURSOR_HOLDS = 5;
+export const RENAMED_LOCAL = (from: string) => `Renamed from ${from}: a shared borehole with that name arrived from the sheet. This one is Local (this phone only).`;
 const keptFlag = (n: number) => `Deleted on another phone, but ${n} reading(s) on this phone were kept`;
 
 /**
@@ -57,9 +59,21 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
     for (const inc of p.boreholes) {
       if (incomingDead.has(inc.uid) || !(await alive(inc.uid, inc.updatedAt))) continue;
       const local = await byUid(tx, inc.uid);
+      if (local && scopeOf(local) === 'local') continue; // 0.5.0: the sheet never changes a Local borehole
       const merged = fromBRec(local ? mergeBorehole(toBRec(local), inc) : inc);
-      const clashName = findName(await bs.getAllKeys(), merged.name);
-      const clash = clashName ? await bs.get(clashName) : undefined;
+      if (local?.hidden) merged.hidden = true; // hidden on this phone stays hidden
+      let clashName = findName(await bs.getAllKeys(), merged.name);
+      let clash = clashName ? await bs.get(clashName) : undefined;
+      if (clash && clash.uid !== inc.uid && scopeOf(clash) === 'local') {
+        // 0.5.0: a Local borehole is never merged into a shared one. Move it out of the way (readings follow), flagged.
+        const now = new Date().toISOString();
+        const moved = { ...clash, name: localCopyName(await bs.getAllKeys(), clash.name), flag: RENAMED_LOCAL(clash.name), updatedAt: now,
+          fieldTimes: { ...clash.fieldTimes, name: now, flag: now } };
+        await _putBorehole(tx, moved, clash.name);
+        changed++;
+        clashName = findName(await bs.getAllKeys(), merged.name);
+        clash = clashName ? await bs.get(clashName) : undefined;
+      }
       if (clash && clash.uid !== inc.uid) {
         // Another borehole here has the same name: the server's record wins the uid, ours folds into it.
         const m2 = fromBRec(mergeBorehole(toBRec(merged), toBRec(clash)));
@@ -91,6 +105,7 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
     for (const inc of incoming) {
       if (incomingDead.has(inc.uid) || !(await alive(inc.uid, inc.updatedAt))) continue;
       const bh = await byUid(tx, inc.boreholeUid);
+      if (bh && scopeOf(bh) === 'local') continue; // 0.5.0: never attach sheet readings to a Local borehole
       if (!bh) { // deleted here (the server sends the reading's tombstone or restores it), or not on the sheet yet
         if (!(await tombs.get(inc.boreholeUid))) { waitForBorehole = true; orphans.set(inc.uid, inc); }
         continue;
@@ -115,6 +130,7 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
     for (const t of order) {
       if (t.kind === 'reading') {
         const local = await rs.index('byUid').get(t.uid);
+        if (local && scopeOf(await byUid(tx, local.boreholeUid ?? '')) === 'local') continue; // 0.5.0: never delete a Local reading
         if (local && local.updatedAt > t.deletedAt) {
           // Edited here after it was deleted elsewhere: keep it and send it again (the sheet restores it, flagged).
           if (!(await ob.get(`r:${local.uid}`))?.failed) { await _queue(tx, 'reading', toRRec(local)); queued++; }
@@ -126,6 +142,7 @@ export async function applyPull(p: PullResult, syncId = `${Date.now()}-${Math.ra
         continue;
       }
       const local = await byUid(tx, t.uid);
+      if (local && scopeOf(local) === 'local') continue; // 0.5.0: the sheet never deletes a Local borehole
       if (local && t.mergedInto) {
         // Same-name merge: follow the chain to the surviving borehole.
         let to = t.mergedInto;

@@ -13,7 +13,18 @@ export interface Borehole {
   fieldTimes?: Partial<Record<BoreholeField, string>>;
   /** Set when two phones created the same Borehole Name and the records were merged; '' = nothing to check. */
   flag?: string;
+  /**
+   * 0.5.0: 'local' = this phone only, never uploaded; 'shared' (or missing, e.g. boreholes saved before 0.5.0 or pulled
+   * from the sheet) = synced. Not part of the sync wire format: the sheet only ever sees shared boreholes.
+   */
+  scope?: Scope;
+  /** 0.5.0: a shared borehole hidden on this phone only (still synced, nothing deleted). */
+  hidden?: boolean;
 }
+export type Scope = 'local' | 'shared';
+/** Missing scope = shared (everything from before 0.5.0 was synced, or could be). */
+export const scopeOf = (b?: { scope?: Scope } | null): Scope => (b?.scope === 'local' ? 'local' : 'shared');
+export const SCOPE_LABEL: Record<Scope, string> = { local: 'Local', shared: 'Shared' };
 export const BOREHOLE_FIELDS = ['name', 'referencePoint', 'refElevationFt', 'flag'] as const;
 export type BoreholeField = (typeof BOREHOLE_FIELDS)[number];
 
@@ -37,7 +48,7 @@ export interface Reading {
 }
 
 /** Report/CSV columns, in their fixed order. */
-export const COLUMNS = ['readingId', 'boreholeName', 'date', 'time', 'userCode', 'referencePoint', 'refElevation', 'depth', 'waterElevation', 'notes'] as const;
+export const COLUMNS = ['readingId', 'boreholeName', 'date', 'time', 'userCode', 'referencePoint', 'refElevation', 'depth', 'waterElevation', 'notes', 'scope'] as const;
 export type ColumnKey = (typeof COLUMNS)[number];
 export type Columns = Record<ColumnKey, boolean>;
 
@@ -49,7 +60,9 @@ export interface Settings {
   userCode: string;
 }
 export const ALL_COLUMNS: Columns = Object.fromEntries(COLUMNS.map((c) => [c, true])) as Columns;
-export const DEFAULT_SETTINGS: Settings = { unit: 'ft', theme: 'auto', columns: { ...ALL_COLUMNS }, userCode: '' };
+/** 0.5.0: the Scope column is opt-in, so existing reports and CSVs keep their shape. */
+const OPT_IN: ColumnKey[] = ['scope'];
+export const DEFAULT_SETTINGS: Settings = { unit: 'ft', theme: 'auto', columns: { ...ALL_COLUMNS, scope: false }, userCode: '' };
 
 export const USER_CODE_MAX = 20;
 /** Trim and uppercase; spaces become '-'. */
@@ -66,8 +79,8 @@ export function userCodeError(code: string): string {
 export function normalizeSettings(x: unknown): Settings {
   const s = (x && typeof x === 'object' ? x : {}) as Record<string, unknown>;
   const c = (s.columns && typeof s.columns === 'object' ? s.columns : {}) as Record<string, unknown>;
-  const columns = Object.fromEntries(COLUMNS.map((k) => [k, c[k] !== false])) as Columns;
-  if (!COLUMNS.some((k) => columns[k])) Object.assign(columns, ALL_COLUMNS);
+  const columns = Object.fromEntries(COLUMNS.map((k) => [k, OPT_IN.includes(k) ? c[k] === true : c[k] !== false])) as Columns;
+  if (!COLUMNS.some((k) => columns[k])) Object.assign(columns, DEFAULT_SETTINGS.columns);
   return { unit: s.unit === 'm' ? 'm' : 'ft', theme: s.theme === 'light' || s.theme === 'dark' ? s.theme : 'auto', columns, userCode: cleanCode(s.userCode) };
 }
 function cleanCode(x: unknown): string {

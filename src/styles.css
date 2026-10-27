@@ -111,3 +111,16 @@ td.notes { min-width: 140px; white-space: normal; }
 .conflict button { width: 100%; margin-top: 8px; min-height: 48px; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .conflict { background: #3a3000; color: #fff3c4; } }
 :root[data-theme='dark'] .conflict { background: #3a3000; color: #fff3c4; }
+/* 0.5.0 Local / Shared */
+.seg { display: flex; border: 2px solid var(--accent); border-radius: 12px; overflow: hidden; }
+.seg button { flex: 1; min-height: 48px; border: 0; border-radius: 0; margin: 0; background: transparent; color: var(--fg); font-weight: 700; font-size: 17px; }
+.seg button + button { border-left: 2px solid var(--accent); }
+.seg button.on { background: var(--accent); color: var(--accent-fg); }
+.seg button:disabled { opacity: .6; }
+.scope-badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 14px; font-weight: 700; white-space: nowrap; vertical-align: middle; }
+.scope-badge.local { background: #fde7c8; color: #6b3a00; border: 1px solid #d98a1c; }
+.scope-badge.shared { background: #d8ebff; color: #0b3d6b; border: 1px solid #4a8fd6; }
+.scope-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.confirm { border: 2px solid var(--accent); border-radius: 12px; padding: 8px 14px; margin: 12px 0; }
+label.check { display: flex; flex-direction: row; justify-content: flex-start; align-items: center; gap: 12px; min-height: 48px; text-align: left; }
+label.check input { width: 26px; height: 26px; min-height: 0; flex: none; margin: 0; }

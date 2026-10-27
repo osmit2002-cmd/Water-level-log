@@ -203,7 +203,7 @@ await page.goto(url + '#/readings');
 ok(!readFileSync(await dl.path(), 'utf8').includes('User Code'), 'User Code column has its own switch (off → not exported)');
 await page.goto(url + '#/settings');
 await page.click('[data-testid=col-userCode]');
-ok((await page.$$('[data-testid=columns] input:checked')).length === 10, '"Turn all on" restores all 10 columns');
+ok((await page.$$('[data-testid=columns] input:checked')).length === 11, '"Turn all on" restores all 11 columns');
 
 // Share path: stub navigator.share to confirm a File is passed when canShare allows it
 await page.goto(url + '#/readings');
@@ -521,6 +521,78 @@ await pa.waitForSelector('[data-testid=sync-enable]');
 ok(await badge(pa) === null, 'turning sync off hides the badge');
 ok((await join(pa, 'new-code-2027')).includes('Sync is on'), 're-join with the new team code');
 await waitBadge(pa, 'synced');
+// ---------- 0.5.0 Local / Shared boreholes ----------
+{
+  const opts = (p) => p.$$eval('[data-testid=rd-borehole] option', (os) => os.map((o) => o.value));
+  const bhRows = () => sheetRows('Boreholes').map((b) => b['Borehole Name']);
+  await pa.goto(url + '#/reading/new');
+  ok(await pa.getAttribute('[data-testid=rd-scope-shared]', 'aria-checked') === 'true', '0.5.0 New Reading defaults to Shared');
+  await pa.click('[data-testid=rd-scope-local]');
+  await pa.waitForSelector('[data-testid=rd-scope-empty]');
+  if (shots) await pa.screenshot({ path: `${shots}/15-new-reading-local-empty.png` });
+  await pa.click('[data-testid=rd-scope-empty] a');
+  await pa.waitForSelector('[data-testid=bh-scope-local][aria-checked=true]');
+  await pa.fill('[data-testid=bh-name]', 'LOC-1');
+  await pa.fill('[data-testid=bh-elev]', '900');
+  if (shots) await pa.screenshot({ path: `${shots}/16-new-borehole-local.png` });
+  await pa.click('[data-testid=bh-save]');
+  await pa.waitForSelector('h2:has-text("LOC-1")');
+  await pa.goto(url + '#/reading/new');
+  ok(await pa.getAttribute('[data-testid=rd-scope-local]', 'aria-checked') === 'true', '0.5.0 New Reading remembers Local');
+  ok(JSON.stringify(await opts(pa)) === '["LOC-1"]', '0.5.0 Local selector lists only Local boreholes');
+  await pa.fill('[data-testid=rd-depth]', '5.5');
+  if (shots) await pa.screenshot({ path: `${shots}/17-new-reading-local.png` });
+  await pa.click('[data-testid=rd-save]');
+  await pa.waitForSelector('[data-testid=history]');
+  await pa.goto(url + '#/reading/new');
+  await pa.click('[data-testid=rd-scope-shared]');
+  ok(!(await opts(pa)).includes('LOC-1') && (await opts(pa)).includes('MW-2'), '0.5.0 Shared selector lists only Shared boreholes');
+  if (shots) await pa.screenshot({ path: `${shots}/18-new-reading-shared.png` });
+  await syncNow(pa);
+  ok(!bhRows().includes('LOC-1') && !sheetRows('Readings').some((r) => r['Borehole Name'] === 'LOC-1'), '0.5.0 Local borehole and its reading never upload');
+  // Readings tab
+  await pa.goto(url + '#/readings');
+  await pa.click('[data-testid=flt-scope-local]');
+  const locRows = await pa.$$eval('[data-testid=readings-table] tbody tr', (t) => t.length);
+  ok(locRows === 1, `0.5.0 Readings tab Local shows only Local readings (${locRows})`);
+  if (shots) await pa.screenshot({ path: `${shots}/19-readings-local.png` });
+  await pa.reload();
+  await pa.waitForSelector('[data-testid=flt-scope-local][aria-checked=true]');
+  ok(true, '0.5.0 Readings tab remembers its choice');
+  await pa.click('[data-testid=flt-scope-all]');
+  const allRows = await pa.$$eval('[data-testid=readings-table] tbody tr', (t) => t.length);
+  ok(allRows > 1 && (await pa.textContent('[data-testid=readings-total]')).includes(`${allRows} of ${allRows}`), `0.5.0 All shows every reading (${allRows})`);
+  if (shots) await pa.screenshot({ path: `${shots}/20-readings-all.png` });
+  // Local -> Shared
+  await pa.goto(url + '#/borehole/LOC-1');
+  await pa.click('[data-testid=conv-share]');
+  await pa.waitForSelector('[data-testid=conv-share-dlg]');
+  if (shots) await snapP(pa, '21-share-confirm.png', '[data-testid=conv-share-dlg]');
+  await pa.click('[data-testid=conv-share-ok]');
+  await pa.waitForSelector('[data-testid=conv-msg]');
+  await syncNow(pa);
+  ok(bhRows().includes('LOC-1') && sheetRows('Readings').filter((r) => r['Borehole Name'] === 'LOC-1').length === 1, '0.5.0 Share uploads the borehole and its history');
+  // Shared -> Local copy (+ hide)
+  const mw2Sheet = sheetRows('Readings').filter((r) => r['Borehole Name'] === 'MW-2').length;
+  await pa.goto(url + '#/borehole/MW-2');
+  await pa.click('[data-testid=conv-copy]');
+  await pa.waitForSelector('[data-testid=conv-copy-dlg]');
+  ok(await pa.inputValue('[data-testid=conv-copy-name]') === 'MW-2 (local)', '0.5.0 copy name defaults to "MW-2 (local)"');
+  if (shots) await snapP(pa, '22-local-copy-dialog.png', '[data-testid=conv-copy-dlg]');
+  await pa.click('[data-testid=conv-copy-ok]');
+  await pa.waitForSelector('h2:has-text("MW-2 (local)")');
+  await syncNow(pa);
+  ok(sheetRows('Readings').filter((r) => r['Borehole Name'] === 'MW-2').length === mw2Sheet && !bhRows().includes('MW-2 (local)'), '0.5.0 local copy deletes nothing and uploads nothing');
+  await pa.goto(url + '#/');
+  const names = await pa.$$eval('[data-testid=borehole-list] strong', (s) => s.map((x) => x.textContent));
+  ok(!names.some((n) => n.startsWith('MW-2') && !n.includes('local')) && names.some((n) => n.includes('MW-2 (local)')), '0.5.0 hidden Shared borehole leaves the list; the copy shows');
+  if (shots) await pa.screenshot({ path: `${shots}/23-list-badges-hidden.png` });
+  await pa.click('[data-testid=show-hidden]');
+  await pa.click('a[href="#/borehole/MW-2"]');
+  await pa.click('[data-testid=bh-unhide]');
+  await pa.waitForSelector('[data-testid=bh-hidden]', { state: 'detached' });
+  ok(true, '0.5.0 Show again unhides');
+}
 await ctx3.close();
 
 ok(external.length === 0, `no requests leave the app origin (${external.length})`);
